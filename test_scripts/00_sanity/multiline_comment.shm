@@ -1,0 +1,12 @@
+/*
+    This should parse
+*/
+
+/*
+    /*
+        Nested multiline comment
+    */
+
+    assert(false)
+// */
+assert(true)
