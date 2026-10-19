@@ -1,4 +1,4 @@
-package lex
+package shimlang
 
 import "core:fmt"
 import "core:os"
@@ -55,6 +55,7 @@ TokenType :: enum(u8) {
 
 Token :: struct {
     type: TokenType,
+    newline: bool,
     pos: u32,
     len: u32,
 }
@@ -152,11 +153,79 @@ ident_to_token_type :: proc(s: string) -> TokenType {
     return .Ident
 }
 
+/*
 
-lex :: proc() -> (ts: TokenStream, err: CompileError) {
+Store the information needed to print errors like:
+
+
+Error: Got 13 arguments, but only used 2
+    --> game.shm(18:19)
+    |
+ 18 | /             pixels.append(
+ 19 | |                 (r.round(), 80, b.round()),
+   ...
+ 30 | |                 "test fail",
+ 31 | |             )
+    | |_____________^
+
+*/
+ErrorInfo :: struct {
+    context_start_lineno: u32,
+    msg: string,
+    filename: string,
+    span: [4]u32, // ((row, col), (row, col))
+    lines: []string,
+}
+
+print_error :: proc(err: ErrorInfo) {
+    fmt.println("Error:", err.msg)
+    fmt.printfln("    --> %s(%v:%v)", err.filename, err.span[0], err.span[1])
+
+    gutter_size := digit_count(err.context_start_lineno + u32(len(err.lines))) + 2
+    for _ in 0..<gutter_size {
+        fmt.print(" ")
+    }
+    fmt.println("|")
+
+    lineno := err.context_start_lineno
+    for i in 0..<len(err.lines) {
+        fmt.print(" ")
+        for _ in 0..<(gutter_size - digit_count(lineno) - 2) {
+            fmt.print(" ")
+        }
+        fmt.print(lineno)
+        fmt.print(" | ")
+
+        if err.span[0] == lineno {
+            fmt.print(" / ")
+        } else if err.span[0] < lineno && lineno <= err.span[2] {
+            fmt.print(" | ")
+        } else {
+            fmt.print("   ")
+        }
+
+        fmt.println(err.lines[i])
+
+        lineno += 1
+    }
+}
+
+digit_count :: proc(num: u32) -> u32 {
+    num := u64(num)
+    comp := u64(9)
+    for count in 1..=9 {
+        if num <= comp {
+            return u32(count)
+        }
+        comp = comp * 10 + 9
+    }
+    return 10
+}
+
+lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
     // Read the text and pad the end with 0's to avoid needing bounds checks
     // (just need a few extra bytes now, but SIMD may need more)
-    data := read_entire_file_with_padding_from_path("game.shm", padding = 16) or_return
+    data := read_entire_file_with_padding_from_path(filename, padding = 16) or_return
     defer if err != nil {
         delete(data)
     }
@@ -179,6 +248,7 @@ lex :: proc() -> (ts: TokenStream, err: CompileError) {
     // on other parsers, but this is unlikely to be much of a bottleneck
     // compared to parsing and type checking
 
+    newline := true
     for i := u32(0); data[i] != 0; i += 1 {
         b := data[i]
         // The byte is checked with the most common bytes/tokens tested earlier
@@ -198,30 +268,30 @@ lex :: proc() -> (ts: TokenStream, err: CompileError) {
                     break
                 }
             }
-            append(&output, {ident_to_token_type(string(data[pos:i+1])), pos, i-pos+1})
+            append(&output, {ident_to_token_type(string(data[pos:i+1])), newline, pos, i-pos+1})
         } else if b == ',' {
-            append(&output, {.Comma, i, 1})
+            append(&output, {.Comma, newline, i, 1})
         } else if b == '=' {
             if data[i+1] == '=' {
-                append(&output, {.DoubleEqual, i, 2})
+                append(&output, {.DoubleEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Equal, i, 1})
+                append(&output, {.Equal, newline, i, 1})
             }
         } else if b == '(' {
-            append(&output, {.LBracket, i, 1})
+            append(&output, {.LBracket, newline, i, 1})
         } else if b == ')' {
-            append(&output, {.RBracket, i, 1})
+            append(&output, {.RBracket, newline, i, 1})
         } else if b == '.' {
-            append(&output, {.Dot, i, 1})
+            append(&output, {.Dot, newline, i, 1})
         } else if b == '{' {
-            append(&output, {.LCurly, i, 1})
+            append(&output, {.LCurly, newline, i, 1})
         } else if b == '}' {
-            append(&output, {.RCurly, i, 1})
+            append(&output, {.RCurly, newline, i, 1})
         } else if b == '[' {
-            append(&output, {.LSquare, i, 1})
+            append(&output, {.LSquare, newline, i, 1})
         } else if b == ']' {
-            append(&output, {.RSquare, i, 1})
+            append(&output, {.RSquare, newline, i, 1})
         } else if '0' <= b && b <= '9' {
             pos := i
             for ;; i += 1 {
@@ -231,32 +301,32 @@ lex :: proc() -> (ts: TokenStream, err: CompileError) {
                     break
                 }
             }
-            append(&output, {.Number, pos, i-pos+1})
+            append(&output, {.Number, newline, pos, i-pos+1})
         } else if b == '+' {
             if data[i+1] == '=' {
-                append(&output, {.PlusEqual, i, 2})
+                append(&output, {.PlusEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Plus, i, 1})
+                append(&output, {.Plus, newline, i, 1})
             }
         } else if b == '*' {
             if data[i+1] == '=' {
-                append(&output, {.StarEqual, i, 2})
+                append(&output, {.StarEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Star, i, 1})
+                append(&output, {.Star, newline, i, 1})
             }
         } else if b == '-' {
             if data[i+1] == '=' {
-                append(&output, {.MinusEqual, i, 2})
+                append(&output, {.MinusEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Minus, i, 1})
+                append(&output, {.Minus, newline, i, 1})
             }
         } else if b == ':' {
-            append(&output, {.Colon, i, 1})
+            append(&output, {.Colon, newline, i, 1})
         } else if b == ';' {
-            append(&output, {.SemiColon, i, 1})
+            append(&output, {.SemiColon, newline, i, 1})
         } else if b == '"' {
             pos := i
             i += 1
@@ -270,31 +340,31 @@ lex :: proc() -> (ts: TokenStream, err: CompileError) {
                 err = .IncompleteString
                 return
             }
-            append(&output, {.String, pos, i-pos+1})
+            append(&output, {.String, newline, pos, i-pos+1})
         } else if b == '!' {
             if data[i+1] == '=' {
-                append(&output, {.BangEqual, i, 2})
+                append(&output, {.BangEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Bang, i, 1})
+                append(&output, {.Bang, newline, i, 1})
             }
         } else if b == '<' {
             if data[i+1] == '=' {
-                append(&output, {.LAngleEqual, i, 2})
+                append(&output, {.LAngleEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.LAngle, i, 1})
+                append(&output, {.LAngle, newline, i, 1})
             }
         } else if b == '>' {
             if data[i+1] == '=' {
-                append(&output, {.RAngleEqual, i, 2})
+                append(&output, {.RAngleEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.RAngle, i, 1})
+                append(&output, {.RAngle, newline, i, 1})
             }
         } else if b == '/' {
             if data[i+1] == '=' {
-                append(&output, {.SlashEqual, i, 2})
+                append(&output, {.SlashEqual, newline, i, 2})
                 i += 1
             } else if data[i+1] == '/' {
                 // This is a comment, skip the rest of the line
@@ -321,14 +391,14 @@ lex :: proc() -> (ts: TokenStream, err: CompileError) {
                     return
                 }
             } else {
-                append(&output, {.Slash, i, 1})
+                append(&output, {.Slash, newline, i, 1})
             }
         } else if b == '%' {
             if data[i+1] == '=' {
-                append(&output, {.PercentEqual, i, 2})
+                append(&output, {.PercentEqual, newline, i, 2})
                 i += 1
             } else {
-                append(&output, {.Percent, i, 1})
+                append(&output, {.Percent, newline, i, 1})
             }
         } else {
             // TODO: Construct a proper error
@@ -438,40 +508,5 @@ print_tokens :: proc(ts: TokenStream) {
         case .RAngleEqual:
             fmt.println(token.type)
         }
-    }
-}
-
-run :: proc() -> (res: bool, err: CompileError) {
-    ts := lex() or_return
-    defer token_stream_destroy(&ts)
-    fmt.println(len(ts.tokens))
-
-    //print_tokens(ts)
-
-    res = true
-    return
-}
-
-main :: proc() {
-    when ODIN_DEBUG {
-        track: mem.Tracking_Allocator
-        mem.tracking_allocator_init(&track, context.allocator)
-        context.allocator = mem.tracking_allocator(&track)
-
-        defer {
-            if len(track.allocation_map) > 0 {
-                fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
-                for _, entry in track.allocation_map {
-                    fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
-                }
-            }
-            mem.tracking_allocator_destroy(&track)
-        }
-    }
-
-    res, err := run()
-    if err != nil {
-        fmt.println("hit some error")
-        fmt.println(err)
     }
 }
