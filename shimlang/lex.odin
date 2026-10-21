@@ -3,6 +3,8 @@ package shimlang
 import "core:fmt"
 import "core:os"
 import "core:mem"
+import "core:bytes"
+import "core:strings"
 
 // Jai uses the literal character as the value of single-letter tokens, which
 // seems more reasonable than having it be arbitrary
@@ -65,7 +67,12 @@ CompileError :: union {
     LexError,
 }
 
-LexError :: enum {
+LexError :: struct {
+    type: LexErrorType,
+    info: ErrorInfo,
+}
+
+LexErrorType :: enum {
     InvalidTokenStart,
     IncompleteMultilineComment,
     IncompleteString,
@@ -87,6 +94,24 @@ human_row_col :: proc(data: []byte, idx: u32) -> (row: u32, col: u32) {
         }
     }
     return
+}
+
+byte_from_row_col :: proc(data: []byte, row: u32, col: u32) -> u32 {
+    tcol := u32(1)
+    trow := u32(1)
+    for b, i in data {
+        tcol += 1
+        if b == '\n' {
+            trow += 1
+            tcol = 1
+        }
+
+        if trow == row && tcol >= col || trow > row {
+            // +1 since we want to return the character _after_ the newline
+            return u32(i+1)
+        }
+    }
+    return u32(len(data)-1)
 }
 
 read_entire_file_with_padding_from_path :: proc(name: string, padding: uint) -> (data: []byte, err: os.Error) {
@@ -175,12 +200,14 @@ ErrorInfo :: struct {
     filename: string,
     span: [4]u32, // ((row, col), (row, col))
     lines: []string,
+    annotation: string,
 }
 
 print_error :: proc(err: ErrorInfo) {
     fmt.println("Error:", err.msg)
     fmt.printfln("    --> %s(%v:%v)", err.filename, err.span[0], err.span[1])
 
+    // The size of the largest line number, plus 1 space of padding on either side
     gutter_size := digit_count(err.context_start_lineno + u32(len(err.lines))) + 2
     for _ in 0..<gutter_size {
         fmt.print(" ")
@@ -196,15 +223,54 @@ print_error :: proc(err: ErrorInfo) {
         fmt.print(lineno)
         fmt.print(" | ")
 
+        underline := false
+        hook_under := false
+
         if err.span[0] == lineno {
-            fmt.print(" / ")
+            if err.span[0] == err.span[2] {
+                underline = true
+                fmt.print("  ")
+            } else {
+                fmt.print("/ ")
+            }
         } else if err.span[0] < lineno && lineno <= err.span[2] {
-            fmt.print(" | ")
+            fmt.print("| ")
+            if lineno == err.span[2] {
+                hook_under = true
+            }
         } else {
-            fmt.print("   ")
+            fmt.print("  ")
         }
 
         fmt.println(err.lines[i])
+
+        if underline {
+            for _ in 0..<(gutter_size+3+err.span[1]) {
+                fmt.print(" ")
+            }
+            for _ in 0..=(err.span[3] - err.span[1]) {
+                fmt.print("^")
+            }
+            if len(err.annotation) != 0 {
+                fmt.print("", err.annotation)
+            }
+            fmt.println()
+        }
+
+        if hook_under {
+            for _ in 0..<(gutter_size) {
+                fmt.print(" ")
+            }
+            fmt.print("| |")
+            for _ in 0..<err.span[3] {
+                fmt.print("_")
+            }
+            fmt.print("^")
+            if len(err.annotation) != 0 {
+                fmt.print("", err.annotation)
+            }
+            fmt.println()
+        }
 
         lineno += 1
     }
@@ -222,6 +288,34 @@ digit_count :: proc(num: u32) -> u32 {
     return 10
 }
 
+lex_error_create :: proc(
+    data: []byte, idx: u32, filename: string, ty: LexErrorType, msg: string = "Unreadable input", annotation: string = "",
+) -> LexError {
+    script := transmute(string)data
+    row, col := human_row_col(data, idx)
+    lines := make([]string, 1, context.temp_allocator)
+    lines[0] = strings.clone(
+        strings.trim_right_space(
+            script[
+                byte_from_row_col(transmute([]byte)script, row, 1)
+                :byte_from_row_col(transmute([]byte)script, row+1, 1)
+            ]
+        ),
+        context.temp_allocator,
+    )
+    return LexError {
+        ty,
+        ErrorInfo {
+            row,
+            msg,
+            strings.clone(filename, context.temp_allocator),
+            {row, col, row, col},
+            lines,
+            annotation,
+        }
+    }
+}
+
 lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
     // Read the text and pad the end with 0's to avoid needing bounds checks
     // (just need a few extra bytes now, but SIMD may need more)
@@ -234,7 +328,14 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
     for b, i in data {
         if b >= 127 {
             fmt.println("Hit invalid byte at index", i)
-            err = .NonAsciiData
+            err = lex_error_create(
+                data,
+                u32(i),
+                filename,
+                .NonAsciiData,
+                "Invalid byte",
+                "remove this byte",
+            )
             return
         }
     }
@@ -337,7 +438,14 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
                 }
             }
             if data[i] == 0 {
-                err = .IncompleteString
+                err = lex_error_create(
+                    data,
+                    pos,
+                    filename,
+                    .IncompleteString,
+                    "String not closed",
+                    "add `\"` to close the string",
+                )
                 return
             }
             append(&output, {.String, newline, pos, i-pos+1})
@@ -370,6 +478,7 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
                 // This is a comment, skip the rest of the line
                 for ; data[i+1] != '\n' && data[i+1] != 0 ; i += 1 {}
             } else if data[i+1] == '*' {
+                comment_start := i
                 i += 2
                 nesting := 1
                 // This is a multiline comment
@@ -387,7 +496,14 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
                     }
                 }
                 if nesting != 0 {
-                    err = .IncompleteMultilineComment
+                    err = lex_error_create(
+                        data,
+                        comment_start,
+                        filename,
+                        .IncompleteMultilineComment,
+                        "Multiline comment not closed",
+                        "add `*/` to close comment",
+                    )
                     return
                 }
             } else {
@@ -401,10 +517,8 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
                 append(&output, {.Percent, newline, i, 1})
             }
         } else {
-            // TODO: Construct a proper error
             row, col := human_row_col(data, i)
-            fmt.printfln("Token error (%v,%v)", row, col)
-            err = .InvalidTokenStart
+            err = lex_error_create(data, i, filename, .InvalidTokenStart, "Unknown character not part of any token", "remove this character")
             return
         }
     }

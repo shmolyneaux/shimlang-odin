@@ -36,7 +36,11 @@ main :: proc() {
 
     res, err := run()
     if err != nil {
-        fmt.println("hit some error")
-        fmt.println(err)
+        switch e in err {
+        case shimlang.LexError:
+            shimlang.print_error(e.info)
+        case os.Error:
+            fmt.println(e)
+        }
     }
 }
