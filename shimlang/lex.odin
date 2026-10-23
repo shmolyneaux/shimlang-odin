@@ -65,6 +65,7 @@ Token :: struct {
 CompileError :: union {
     os.Error,
     LexError,
+    ParseError,
 }
 
 LexError :: struct {
@@ -77,6 +78,16 @@ LexErrorType :: enum {
     IncompleteMultilineComment,
     IncompleteString,
     NonAsciiData,
+}
+
+ParseError :: struct {
+    type: ParseErrorType,
+    info: ErrorInfo,
+}
+
+ParseErrorType :: enum {
+    VariableDeclarationNotIdent,
+    Todo,
 }
 
 human_row_col :: proc(data: []byte, idx: u32) -> (row: u32, col: u32) {
@@ -97,6 +108,9 @@ human_row_col :: proc(data: []byte, idx: u32) -> (row: u32, col: u32) {
 }
 
 byte_from_row_col :: proc(data: []byte, row: u32, col: u32) -> u32 {
+    if row == 1 && col == 1 {
+        return 0
+    }
     tcol := u32(1)
     trow := u32(1)
     for b, i in data {
@@ -147,6 +161,22 @@ token_stream_destroy :: proc(ts: ^TokenStream, allocator := context.allocator) {
     delete(ts.script)
     delete(ts.tokens)
     ts^ = {}
+}
+
+ts_peek :: proc(ts: ^TokenStream) -> Token {
+    return ts.tokens[ts.idx]
+}
+
+ts_consume :: proc(ts: ^TokenStream) {
+    when ODIN_DEBUG {
+        // ts.idx should always be a valid index
+        // We pad the tokens with multiple `END` tokens to avoid needing to check
+        // if we've run out of tokens (outside of normal bounds checking).
+        // A correctly-implemented parser shouldn't be consuming the END tokens
+        assert(ts.idx < len(ts.tokens) - 1)
+        assert(ts.tokens[ts.idx].type != .End)
+    }
+    ts.idx += 1
 }
 
 ident_to_token_type :: proc(s: string) -> TokenType {
@@ -287,6 +317,45 @@ digit_count :: proc(num: u32) -> u32 {
         comp = comp * 10 + 9
     }
     return 10
+}
+
+// Generate a parse error for the next token
+ts_token_parse_error_create :: proc(
+    ts: ^TokenStream,
+    ty: ParseErrorType,
+    msg: string = "Could not parse input",
+    annotation: string = "",
+) -> ParseError {
+    tk := ts_peek(ts)
+
+    script := transmute(string)ts.script
+
+    // With the exception of multiline string literals, tokens shouldn't cross
+    // multiple rows
+    row, start_col := human_row_col(ts.script, tk.pos)
+    _, end_col := human_row_col(ts.script, tk.pos + tk.len - 1)
+
+    lines := make([]string, 1, context.temp_allocator)
+    lines[0] = strings.clone(
+        strings.trim_right_space(
+            script[
+                byte_from_row_col(transmute([]byte)script, row, 1)
+                :byte_from_row_col(transmute([]byte)script, row+1, 1)
+            ]
+        ),
+        context.temp_allocator,
+    )
+    return ParseError {
+        ty,
+        ErrorInfo {
+            row,
+            msg,
+            strings.clone("filename.todo", context.temp_allocator),
+            {row, start_col, row, end_col},
+            lines,
+            annotation,
+        }
+    }
 }
 
 lex_error_create :: proc(
@@ -523,6 +592,11 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
             return
         }
     }
+
+    append(&output, {.End, false, u32(len(data)), u32(len(data))})
+    append(&output, {.End, false, u32(len(data)), u32(len(data))})
+    append(&output, {.End, false, u32(len(data)), u32(len(data))})
+    append(&output, {.End, false, u32(len(data)), u32(len(data))})
 
     ts = {
         script = data,

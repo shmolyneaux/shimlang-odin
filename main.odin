@@ -38,6 +38,8 @@ main :: proc() {
         switch e in err {
         case shimlang.LexError:
             shimlang.print_error(e.info)
+        case shimlang.ParseError:
+            shimlang.print_error(e.info)
         case os.Error:
             fmt.println(e)
         }
