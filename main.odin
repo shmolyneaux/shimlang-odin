@@ -9,9 +9,8 @@ import "shimlang"
 run :: proc() -> (res: bool, err: shimlang.CompileError) {
     ts := shimlang.lex("game.shm") or_return
     defer shimlang.token_stream_destroy(&ts)
-    fmt.println(len(ts.tokens))
 
-    //ast := parse(ts)
+    ast := shimlang.parse(&ts) or_return
 
     res = true
     return

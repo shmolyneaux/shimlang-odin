@@ -140,6 +140,7 @@ read_entire_file_with_padding_from_path :: proc(name: string, padding: uint) -> 
 TokenStream :: struct {
     script: []byte,
     tokens: []Token,
+    idx: int,
 }
 
 token_stream_destroy :: proc(ts: ^TokenStream, allocator := context.allocator) {
@@ -526,6 +527,7 @@ lex :: proc(filename: string) -> (ts: TokenStream, err: CompileError) {
     ts = {
         script = data,
         tokens = output[:],
+        idx = 0,
     }
     return
 }

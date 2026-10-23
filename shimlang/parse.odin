@@ -2,6 +2,10 @@ package shimlang
 
 import "core:fmt"
 
-print_test :: proc() {
+Module :: struct{
+}
+
+parse :: proc(ts: ^TokenStream) -> (Module, CompileError) {
     fmt.println("test")
+    return {}, nil
 }
