@@ -10,7 +10,10 @@ run :: proc() -> (res: bool, err: shimlang.CompileError) {
     ts := shimlang.lex("game.shm") or_return
     defer shimlang.token_stream_destroy(&ts)
 
-    ast := shimlang.parse(&ts) or_return
+    module := shimlang.parse(&ts) or_return
+    defer shimlang.module_destroy(&module)
+
+    fmt.println(module)
 
     res = true
     return
@@ -26,7 +29,7 @@ main :: proc() {
             if len(track.allocation_map) > 0 {
                 fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
                 for _, entry in track.allocation_map {
-                    fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+                    fmt.eprintf("- %v bytes @ %v %v\n", entry.size, entry.location, entry.memory)
                 }
             }
             mem.tracking_allocator_destroy(&track)

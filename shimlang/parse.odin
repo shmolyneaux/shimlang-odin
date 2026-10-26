@@ -2,9 +2,6 @@ package shimlang
 
 import "core:fmt"
 
-Module :: struct{
-}
-
 // We want to be able to run code at the top level of a file, but we also want
 // to be able to call functions mutually-recursively. We can't impose a strict
 // ordering on `fn A` needing to be declared before `fn B` if they call each
@@ -16,9 +13,15 @@ Module :: struct{
 // some complications for which global variable is captured/referenced by a
 // declaration.
 
-NodeId :: distinct int;
+NodeId :: distinct i32
 
-Node :: union {
+EMPTY :: NodeId(-1)
+EMPTY_NODE :: Empty {}
+
+Empty :: struct {}
+
+Node :: union #no_nil {
+    Empty,
     Leaf,
     UnaryOp,
     BinaryOp,
@@ -27,7 +30,7 @@ Node :: union {
     Assignment,
 }
 
-Leaf :: union {
+Leaf :: union #no_nil {
     Ident,
     Number,
     String,
@@ -38,7 +41,7 @@ Ident :: struct {
     token: Token,
 }
 
-Number :: union {
+Number :: union #no_nil {
     i64,
     f64,
 }
@@ -79,14 +82,83 @@ Assignment :: struct {
     expr: NodeId,
 }
 
+Module :: struct {
+    nodes: []Node,
+}
+
+module_destroy :: proc(mod: ^Module) {
+    delete(mod.nodes)
+}
+
+Parser :: struct {
+    ts: ^TokenStream,
+    nodes: [dynamic]Node,
+}
+
+peek :: proc(p: ^Parser) -> Token {
+    return ts_peek(p.ts)
+}
+
+consume :: proc(p: ^Parser) {
+    ts_consume(p.ts)
+}
+
+push_number :: proc(p: ^Parser, num: Number) -> NodeId{
+    id := NodeId(len(p.nodes))
+    append(&p.nodes, Leaf(num))
+    return id
+}
+
+parse_expr :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
+    tok := peek(p)
+    #partial switch tok.type {
+    case .Number:
+        consume(p)
+        whole: i64 = 0
+        for pos in tok.pos..<(tok.pos+tok.len) {
+            b := p.ts.script[pos]
+            whole *= 10
+            if '0' <= b && b <= '9' {
+                whole += i64(b - '0')
+            } else {
+                err = ts_token_parse_error_create(
+                    p.ts,
+                    .Todo,
+                    "Can only handle parsingintegers",
+                    "not an integer",
+                )
+                return
+            }
+        }
+        node_id = push_number(p, whole)
+        return
+    }
+    err = ts_token_parse_error_create(
+        p.ts,
+        .Todo,
+        "Token invalid for parsing expression",
+        "what do",
+    )
+    return
+}
+
 parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
-    for ;; {
-        tok := ts_peek(ts)
+    parser: Parser
+    parser.ts = ts
+
+    defer if err != nil {
+        delete(parser.nodes)
+    }
+
+    p := &parser
+
+    parse_loop: for ;; {
+        tok := peek(p)
         #partial switch tok.type {
         case .Let:
-            ts_consume(ts)
+            consume(p)
 
-            tk := ts_peek(ts)
+            tk := peek(p)
             if tk.type != .Ident {
                 err = ts_token_parse_error_create(
                     ts,
@@ -97,9 +169,9 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
                 return
             }
             ident_tk := tk
-            ts_consume(ts)
+            consume(p)
 
-            if ts_peek(ts).type != .Equal {
+            if peek(p).type != .Equal {
                 err = ts_token_parse_error_create(
                     ts,
                     .Todo,
@@ -108,26 +180,31 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
                 )
                 return
             }
-            ts_consume(ts)
+            consume(p)
 
+            decl_idx := len(p.nodes)
+            append(&p.nodes, EMPTY_NODE)
+
+            expr_node := parse_expr(p) or_return
+            p.nodes[decl_idx] = VariableDeclaration {
+                target = ident_tk,
+                expr = expr_node,
+            }
+
+        case .End:
+            break parse_loop
+
+        case:
             err = ts_token_parse_error_create(
                 ts,
                 .Todo,
-                "TODO: Parse the expression",
-                "expression parsing not implemented",
+                "TODO expressions/assignment",
             )
-            return
-
-        case:
-            fmt.println("TODO expressions/assignment")
-                err = ts_token_parse_error_create(
-                    ts,
-                    .Todo,
-                    "TODO expressions/assignment",
-                )
             return
         }
     }
 
-    return {}, nil
+    return {
+        nodes = p.nodes[:]
+    }, nil
 }
