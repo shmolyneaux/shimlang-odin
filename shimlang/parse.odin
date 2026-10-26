@@ -15,7 +15,7 @@ import "core:fmt"
 
 NodeId :: distinct i32
 
-EMPTY :: NodeId(-1)
+EMPTY :: NodeId(0)
 EMPTY_NODE :: Empty {}
 
 Empty :: struct {}
@@ -109,11 +109,48 @@ push_number :: proc(p: ^Parser, num: Number) -> NodeId{
     return id
 }
 
-parse_expr :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
+push_string :: proc(p: ^Parser, s: String) -> NodeId{
+    id := NodeId(len(p.nodes))
+    append(&p.nodes, Leaf(s))
+    return id
+}
+
+push_node :: proc(p: ^Parser, n: Node) -> NodeId{
+    id := NodeId(len(p.nodes))
+    append(&p.nodes, n)
+    return id
+}
+
+parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileError) {
     tok := peek(p)
+    if tok.type == .End {
+        break
+    }
+    consume(p)
+    fmt.eprintln(tok)
+
+    rhs: NodeId
+    lhs: NodeId
     #partial switch tok.type {
+    case .LBracket:
+        lhs = parse_expr(p) or_return
+        if peek(p).type == .RBracket {
+            consume(p)
+        } else {
+            err = ts_token_parse_error_create(
+                p.ts,
+                .Todo,
+                "Unmatched `(` when parsing expression",
+                "expected `)`",
+            )
+            return
+        }
+    case .Plus:
+        fallthrough
+    case .Minus:
+        rhs = parse_expr(p, 25) or_return
+        lhs = push_node(p, UnaryOp { tok, rhs })
     case .Number:
-        consume(p)
         whole: i64 = 0
         for pos in tok.pos..<(tok.pos+tok.len) {
             b := p.ts.script[pos]
@@ -124,21 +161,32 @@ parse_expr :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
                 err = ts_token_parse_error_create(
                     p.ts,
                     .Todo,
-                    "Can only handle parsingintegers",
+                    "Can only handle parsing integers",
                     "not an integer",
                 )
                 return
             }
         }
         node_id = push_number(p, whole)
+        continue
+    case .String:
+        node_id = push_string(p, String {tok})
+        continue
+    case:
+        err = ts_token_parse_error_create(
+            p.ts,
+            .Todo,
+            fmt.tprintf("Token .%v invalid when parsing expression", tok.type),
+            fmt.tprintf("invalid token .%v", tok.type),
+        )
         return
     }
-    err = ts_token_parse_error_create(
-        p.ts,
-        .Todo,
-        "Token invalid for parsing expression",
-        "what do",
-    )
+
+    for ;; {
+        // TODO: implement Pratt parser
+        break
+    }
+
     return
 }
 
@@ -151,6 +199,7 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
     }
 
     p := &parser
+    append(&p.nodes, EMPTY_NODE)
 
     parse_loop: for ;; {
         tok := peek(p)
