@@ -124,7 +124,13 @@ push_node :: proc(p: ^Parser, n: Node) -> NodeId{
 parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileError) {
     tok := peek(p)
     if tok.type == .End {
-        break
+        err = ts_token_parse_error_create(
+            p.ts,
+            .Todo,
+            "End of file when an expression was expected",
+            "expected expression",
+        )
+        return
     }
     consume(p)
     fmt.eprintln(tok)
@@ -167,11 +173,9 @@ parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileErr
                 return
             }
         }
-        node_id = push_number(p, whole)
-        continue
+        lhs = push_number(p, whole)
     case .String:
-        node_id = push_string(p, String {tok})
-        continue
+        lhs = push_string(p, String {tok})
     case:
         err = ts_token_parse_error_create(
             p.ts,
