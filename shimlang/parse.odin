@@ -228,7 +228,6 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
     }
 
     p := &parser
-    append(&p.nodes, EMPTY_NODE)
 
     parse_loop: for ;; {
         tok := peek(p)
