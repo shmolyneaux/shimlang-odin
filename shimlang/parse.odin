@@ -61,7 +61,7 @@ UnaryOp :: struct {
 }
 
 BinaryOp :: struct {
-    op: Token,
+    op: TokenType,
     left: NodeId,
     right: NodeId,
 }
@@ -103,25 +103,44 @@ consume :: proc(p: ^Parser) {
     ts_consume(p.ts)
 }
 
-push_number :: proc(p: ^Parser, num: Number) -> NodeId{
+push_number :: proc(p: ^Parser, num: Number) -> NodeId {
     id := NodeId(len(p.nodes))
     append(&p.nodes, Leaf(num))
     return id
 }
 
-push_string :: proc(p: ^Parser, s: String) -> NodeId{
+push_string :: proc(p: ^Parser, s: String) -> NodeId {
     id := NodeId(len(p.nodes))
     append(&p.nodes, Leaf(s))
     return id
 }
 
-push_node :: proc(p: ^Parser, n: Node) -> NodeId{
+push_node :: proc(p: ^Parser, n: Node) -> NodeId {
     id := NodeId(len(p.nodes))
     append(&p.nodes, n)
     return id
 }
 
-parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileError) {
+push_binary :: proc(p: ^Parser, op: TokenType, lhs: NodeId, rhs: NodeId) -> NodeId {
+    id := NodeId(len(p.nodes))
+    n: Node = BinaryOp {op, lhs, rhs}
+    append(&p.nodes, n)
+    return id
+}
+
+BINDING_POWER := #partial #sparse [TokenType][2]u8 {
+    .Plus = {10, 11},
+    .Minus = {10, 11},
+    .Star = {20, 21},
+    .Slash = {20, 21},
+}
+
+bp_lookup :: proc(ty: TokenType) -> (left_bp: u8, right_bp: u8, ok: bool) {
+    bp := BINDING_POWER[ty]
+    return bp[0], bp[1], bp[0] != 0
+}
+
+parse_expr :: proc(p: ^Parser, min_bp: u8 = 0) -> (node_id: NodeId, err: CompileError) {
     tok := peek(p)
     if tok.type == .End {
         err = ts_token_parse_error_create(
@@ -135,7 +154,6 @@ parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileErr
     consume(p)
     fmt.eprintln(tok)
 
-    rhs: NodeId
     lhs: NodeId
     #partial switch tok.type {
     case .LBracket:
@@ -154,7 +172,7 @@ parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileErr
     case .Plus:
         fallthrough
     case .Minus:
-        rhs = parse_expr(p, 25) or_return
+        rhs := parse_expr(p, 25) or_return
         lhs = push_node(p, UnaryOp { tok, rhs })
     case .Number:
         whole: i64 = 0
@@ -187,11 +205,18 @@ parse_expr :: proc(p: ^Parser, bp: int = 0) -> (node_id: NodeId, err: CompileErr
     }
 
     for ;; {
-        // TODO: implement Pratt parser
-        break
+        tok := peek(p)
+        left_bp, right_bp, bp_ok := bp_lookup(tok.type)
+        if !bp_ok || left_bp < min_bp {
+            break
+        }
+        consume(p)
+
+        rhs := parse_expr(p, right_bp) or_return
+        lhs = push_binary(p, tok.type, lhs, rhs)
     }
 
-    return
+    return lhs, nil
 }
 
 parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
