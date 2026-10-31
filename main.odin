@@ -13,7 +13,10 @@ run :: proc() -> (res: bool, err: shimlang.CompileError) {
     module := shimlang.parse(&ts) or_return
     defer shimlang.module_destroy(&module)
 
-    fmt.println(module)
+
+    for n, i in module.nodes {
+        fmt.printfln("%v: %v", i, n)
+    }
 
     res = true
     return

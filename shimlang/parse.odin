@@ -28,6 +28,7 @@ Node :: union #no_nil {
     Call,
     VariableDeclaration,
     Assignment,
+    Block,
 }
 
 Leaf :: union #no_nil {
@@ -82,8 +83,15 @@ Assignment :: struct {
     expr: NodeId,
 }
 
+Block :: struct {
+    pos: u32,
+    len: u32,
+}
+
 Module :: struct {
     nodes: []Node,
+    lists: []NodeId,
+    root: NodeId,
 }
 
 module_destroy :: proc(mod: ^Module) {
@@ -93,6 +101,7 @@ module_destroy :: proc(mod: ^Module) {
 Parser :: struct {
     ts: ^TokenStream,
     nodes: [dynamic]Node,
+    lists: [dynamic]NodeId,
 }
 
 peek :: proc(p: ^Parser) -> Token {
@@ -222,13 +231,23 @@ parse_expr :: proc(p: ^Parser, min_bp: u8 = 0) -> (node_id: NodeId, err: Compile
 parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
     parser: Parser
     parser.ts = ts
-
     defer if err != nil {
         delete(parser.nodes)
     }
 
     p := &parser
 
+    id := parse_block(p) or_return
+
+    return {
+        nodes = p.nodes[:],
+        lists = p.lists[:],
+        root = id,
+    }, nil
+}
+
+parse_block :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
+    list_start := u32(len(p.lists))
     parse_loop: for ;; {
         tok := peek(p)
         #partial switch tok.type {
@@ -238,7 +257,7 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
             tk := peek(p)
             if tk.type != .Ident {
                 err = ts_token_parse_error_create(
-                    ts,
+                    p.ts,
                     .VariableDeclarationNotIdent,
                     "VariableDeclarationNotIdent",
                     "this should be an identifier",
@@ -250,7 +269,7 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
 
             if peek(p).type != .Equal {
                 err = ts_token_parse_error_create(
-                    ts,
+                    p.ts,
                     .Todo,
                     "Expected `=` in variable declaration",
                     "expected `=` here",
@@ -259,21 +278,24 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
             }
             consume(p)
 
-            decl_idx := len(p.nodes)
-            append(&p.nodes, EMPTY_NODE)
 
             expr_node := parse_expr(p) or_return
-            p.nodes[decl_idx] = VariableDeclaration {
-                target = ident_tk,
-                expr = expr_node,
-            }
+            append(
+                &p.nodes,
+                p.nodes[decl_idx] = VariableDeclaration {
+                    target = ident_tk,
+                    expr = expr_node,
+                },
+            )
+
+            append(&p.lists, len(p.nodes)-1)
 
         case .End:
             break parse_loop
 
         case:
             err = ts_token_parse_error_create(
-                ts,
+                p.ts,
                 .Todo,
                 "TODO expressions/assignment",
             )
@@ -281,7 +303,14 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
         }
     }
 
-    return {
-        nodes = p.nodes[:]
-    }, nil
+    node_id = NodeId(len(p.nodes))
+    append(
+        &p.nodes,
+        Block {
+            pos = list_start,
+            len = u32(len(p.lists)) - list_start,
+        }
+    )
+
+    return
 }
