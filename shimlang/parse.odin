@@ -96,6 +96,7 @@ Module :: struct {
 
 module_destroy :: proc(mod: ^Module) {
     delete(mod.nodes)
+    delete(mod.lists)
 }
 
 Parser :: struct {
@@ -233,6 +234,7 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
     parser.ts = ts
     defer if err != nil {
         delete(parser.nodes)
+        delete(parser.lists)
     }
 
     p := &parser
@@ -282,13 +284,13 @@ parse_block :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
             expr_node := parse_expr(p) or_return
             append(
                 &p.nodes,
-                p.nodes[decl_idx] = VariableDeclaration {
+                VariableDeclaration {
                     target = ident_tk,
                     expr = expr_node,
                 },
             )
 
-            append(&p.lists, len(p.nodes)-1)
+            append(&p.lists, NodeId(len(p.nodes)-1))
 
         case .End:
             break parse_loop
