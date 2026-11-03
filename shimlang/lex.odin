@@ -179,6 +179,13 @@ ts_consume :: proc(ts: ^TokenStream) {
     ts.idx += 1
 }
 
+ts_unconsume :: proc(ts: ^TokenStream) {
+    when ODIN_DEBUG {
+        assert(ts.idx > 0)
+    }
+    ts.idx -= 1
+}
+
 ident_to_token_type :: proc(s: string) -> TokenType {
     switch s {
     case "if":

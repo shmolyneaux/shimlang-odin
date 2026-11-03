@@ -18,6 +18,12 @@ run :: proc() -> (res: bool, err: shimlang.CompileError) {
         fmt.printfln("%v: %v", i, n)
     }
 
+    fmt.println("\nLists")
+
+    for n, i in module.lists {
+        fmt.printfln("%v: %v", i, n)
+    }
+
     res = true
     return
 }

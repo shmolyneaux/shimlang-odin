@@ -74,12 +74,12 @@ Call :: struct {
 }
 
 VariableDeclaration :: struct {
-    target: Token,
+    target: NodeId,
     expr: NodeId,
 }
 
 Assignment :: struct {
-    target: Token,
+    target: NodeId,
     expr: NodeId,
 }
 
@@ -113,6 +113,10 @@ consume :: proc(p: ^Parser) {
     ts_consume(p.ts)
 }
 
+unconsume :: proc(p: ^Parser) {
+    ts_unconsume(p.ts)
+}
+
 push_number :: proc(p: ^Parser, num: Number) -> NodeId {
     id := NodeId(len(p.nodes))
     append(&p.nodes, Leaf(num))
@@ -122,6 +126,12 @@ push_number :: proc(p: ^Parser, num: Number) -> NodeId {
 push_string :: proc(p: ^Parser, s: String) -> NodeId {
     id := NodeId(len(p.nodes))
     append(&p.nodes, Leaf(s))
+    return id
+}
+
+push_ident :: proc(p: ^Parser, ident_tk: Token) -> NodeId {
+    id := NodeId(len(p.nodes))
+    append(&p.nodes, Leaf(Ident { ident_tk }))
     return id
 }
 
@@ -162,7 +172,6 @@ parse_expr :: proc(p: ^Parser, min_bp: u8 = 0) -> (node_id: NodeId, err: Compile
         return
     }
     consume(p)
-    fmt.eprintln(tok)
 
     lhs: NodeId
     #partial switch tok.type {
@@ -204,7 +213,10 @@ parse_expr :: proc(p: ^Parser, min_bp: u8 = 0) -> (node_id: NodeId, err: Compile
         lhs = push_number(p, whole)
     case .String:
         lhs = push_string(p, String {tok})
+    case .Ident:
+        lhs = push_ident(p, tok)
     case:
+        unconsume(p)
         err = ts_token_parse_error_create(
             p.ts,
             .Todo,
@@ -249,7 +261,7 @@ parse :: proc(ts: ^TokenStream) -> (module: Module, err: CompileError) {
 }
 
 parse_block :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
-    list_start := u32(len(p.lists))
+    block_list := make([dynamic]NodeId, context.temp_allocator)
     parse_loop: for ;; {
         tok := peek(p)
         #partial switch tok.type {
@@ -266,7 +278,7 @@ parse_block :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
                 )
                 return
             }
-            ident_tk := tk
+            ident_node := push_ident(p, tk)
             consume(p)
 
             if peek(p).type != .Equal {
@@ -285,34 +297,52 @@ parse_block :: proc(p: ^Parser) -> (node_id: NodeId, err: CompileError) {
             append(
                 &p.nodes,
                 VariableDeclaration {
-                    target = ident_tk,
+                    target = ident_node,
                     expr = expr_node,
                 },
             )
-
-            append(&p.lists, NodeId(len(p.nodes)-1))
 
         case .End:
             break parse_loop
 
         case:
-            err = ts_token_parse_error_create(
-                p.ts,
-                .Todo,
-                "TODO expressions/assignment",
-            )
-            return
+            node := parse_expr(p) or_return
+
+            if peek(p).type == .Equal {
+                consume(p)
+
+                lhs := node
+                rhs := parse_expr(p) or_return
+                node = NodeId(len(p.nodes))
+
+                append(
+                    &p.nodes,
+                    Assignment {
+                        target = lhs,
+                        expr = rhs,
+                    }
+                )
+            }
         }
+
+        // Every iteration produces a statement that gets added to the list of
+        // statements
+        append(&block_list, NodeId(len(p.nodes)-1))
     }
 
     node_id = NodeId(len(p.nodes))
     append(
         &p.nodes,
         Block {
-            pos = list_start,
-            len = u32(len(p.lists)) - list_start,
+            pos = u32(len(p.lists)),
+            len = u32(len(block_list)),
         }
     )
+
+    // TODO: the "extend" equivalent
+    for v in block_list {
+        append(&p.lists, v)
+    }
 
     return
 }
