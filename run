@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+import math, sys
+import subprocess
+
+from argparse import ArgumentParser
+from pathlib import Path
+from wasmtime import (
+    Engine,
+    Store,
+    Module,
+    Linker,
+    Memory,
+    MemoryType,
+    Limits,
+    FuncType,
+    ValType,
+)
+
+parser = ArgumentParser()
+parser.add_argument("input_file", type=Path)
+
+args = parser.parse_args()
+
+if args.input_file.suffix == ".wast":
+    wasm_file = args.input_file.with_suffix(".wasm")
+    subprocess.run(["wat2wasm", args.input_file, "-o", wasm_file])
+else:
+    wasm_file = args.input_file
+
+engine = Engine()
+store = Store(engine)
+module = Module.from_file(engine, wasm_file)
+imported_memory = Memory(store, MemoryType(Limits(1, None)))
+
+
+def memory(caller):
+    # The memory the module exports, or else the one it imported.
+    return caller.get("memory") or imported_memory
+
+
+def text(caller, ptr, length):
+    ptr, length = ptr & 0xFFFF_FFFF, length & 0xFFFF_FFFF
+    return memory(caller).read(caller, ptr, ptr + length).decode("utf-8", "replace")
+
+
+i32, i64, f32, f64 = ValType.i32(), ValType.i64(), ValType.f32(), ValType.f64()
+linker = Linker(engine)
+
+
+def define(name, params, func, access_caller=False):
+    linker.define_func("env", name, FuncType(params, []), func, access_caller)
+
+
+define("print_i32", [i32], lambda x: print(x))
+define("print_u32", [i32], lambda x: print(x & 0xFFFF_FFFF))
+define("print_i64", [i64], lambda x: print(x))
+define("print_f32", [f32], lambda x: print(x))
+define("print_f64", [f64], lambda x: print(x))
+define("print", [i32, i32], lambda c, p, n: print(text(c, p, n)), True)
+define("write", [i32, i32], lambda c, p, n: print(text(c, p, n), end=""), True)
+linker.define(store, "env", "memory", imported_memory)
+
+instance = linker.instantiate(store, module)
+result = instance.exports(store)["main"](store)
+if result is not None:
+    values = result if isinstance(result, list) else [result]
+    print(" ".join(str(v) for v in values))
