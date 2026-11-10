@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+from argparse import ArgumentParser
+
+parser = ArgumentParser()
+parser.add_argument("input_file", type=Path)
+parser.add_argument("-o", "--output_file", type=Path)
+
+args = parser.parse_args()
+
+if not args.input_file.exists():
+    sys.exit(f"Input file {args.input_file} does not exist")
+
+if not args.output_file:
+    args.output_file = args.input_file.with_suffix(".wasm")
+
+class i32:
+    @staticmethod
+    def byte():
+        b"\x7f"
+
+class i64:
+    pass
+    @staticmethod
+    def byte():
+        b"\x7e"
+
+class f32:
+    @staticmethod
+    def byte():
+        b"\x7d"
+
+class f64:
+    @staticmethod
+    def byte():
+        b"\x7c"
+
+class v128:
+    @staticmethod
+    def byte():
+        b"\x7b"
+
+class funcref:
+    @staticmethod
+    def byte():
+        b"\x70"
+
+class externref:
+    @staticmethod
+    def byte():
+        b"\x6f"
+
+# Probably ignorable? Exception object
+class exnref:
+    @staticmethod
+    def byte():
+        b"\x69"
+
+def uleb(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7f
+        n >>= 7
+        if n:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+def sleb(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7f
+        n >>= 7
+        done = (n == 0 and not byte & 0x40) or (n == -1 and byte & 0x40)
+        out.append(byte if done else byte | 0x80)
+        if done:
+            return bytes(out)
+
+class TypeSection:
+    types: list[FuncSignature]
+
+    @staticmethod
+    def id() -> int:
+        return 1
+
+    def to_bytes(self) -> bytes:
+        body = bytearray()
+        for t in self.types:
+            body.extend(t.to_bytes())
+
+        section = bytearray()
+        section.append(self.id())
+        section.append(uleb(len(body))
+        section.extend(body)
+
+        return bytes(section)
+
+
+class FuncSignature:
+    params: list[WasmType]
+    results: list[WasmType]
+
+    def to_bytes(self) -> bytes:
+        b = bytearray()
+        b.append("\x60")
+        b.extend(uleb(len(self.params)))
+        for param in self.params:
+            b.extend(param.to_bytes())
+        b.extend(uleb(len(self.results)))
+        for result in self.results:
+            b.extend(result.to_bytes())
+        return bytes(b)
+
+
+class FuncImport:
+    @staticmethod
+    def kind_id():
+        return 0
+
+class TableImport:
+    @staticmethod
+    def kind_id():
+        return 1
+
+class MemoryImport:
+    @staticmethod
+    def kind_id():
+        return 2
+
+class GlobalImport:
+    @staticmethod
+    def kind_id():
+        return 3
+
+class TagImport:
+    @staticmethod
+    def kind_id():
+        return 4
+
+ImportDescription = FuncImport | TableImport | MemoryImport | GlobalImport | TagImport
+
+class Import:
+    module: str
+    field: str
+    description: ImportDescription
+
+class ImportSection:
+    @staticmethod
+    def id() -> int:
+        return 2
+
+
+class FunctionSection:
+    func_types: list[WasmType]
+
+    @staticmethod
+    def id() -> int:
+        return 3
+
+
+class TableSection:
+    @staticmethod
+    def id() -> int:
+        return 4
+
+
+class MemorySection:
+    @staticmethod
+    def id() -> int:
+        return 5
+
+
+class TagSection:
+    @staticmethod
+    def id() -> int:
+        return 13
+
+
+class GlobalSection:
+    @staticmethod
+    def id() -> int:
+        return 6
+
+
+@dataclass
+class FunctionExport:
+    name: str
+    func: FuncIndex
+
+
+class ExportSection:
+    exports: FunctionExport
+
+    @staticmethod
+    def id() -> int:
+        return 7
+
+    def to_bytes(self) -> bytes:
+        body = bytearray()
+        for t in self.exports:
+            body.extend(export.to_bytes())
+
+        section = bytearray()
+        section.append(self.id())
+        section.append(uleb(len(body))
+        section.extend(body)
+
+        return bytes(section)
+
+
+class StartSection:
+    @staticmethod
+    def id() -> int:
+        return 8
+
+
+class ElementSection:
+    @staticmethod
+    def id() -> int:
+        return 9
+
+
+class DataCountSection:
+    @staticmethod
+    def id() -> int:
+        return 12
+
+
+class CodeSection:
+    @staticmethod
+    def id() -> int:
+        return 10
+
+
+class DataSection:
+    @staticmethod
+    def id() -> int:
+        return 11
+
+
+class CustomSection:
+    @staticmethod
+    def id() -> int:
+        return 0
+
+
+class Module:
+    types: TypeSection | None = None
+    imports: ImportSection | None = None
+    functions: FunctionSection | None = None
+    tables: TableSection | None = None
+    memory: MemorySection | None = None
+    tags: TagSection | None = None
+    globals: GlobalSection | None = None
+    exports: ExportSection | None = None
+    start: StartSection | None = None
+    elements: ElementSection | None = None
+    data_counts: DataCountSection | None = None
+    code: CodeSection | None = None
+    data: DataSection | None = None
+    custom: CustomSection | None = None
+
+    def to_bytes(self) -> bytes:
+        preamble = b"\x00\x61\x73\x6d" +  # "\0asm"
+                   b"\x01\x00\x00\x00"    # version 1
+
+        b = bytearray()
+        b.extend(preamble)
+
+        if self.types:
+            b.extend(self.types.to_bytes())
+
+        if self.functions:
+            b.extend(self.functions.to_bytes())
+
+        if self.exports:
+            b.extend(self.exports.to_bytes())
+
+        if self.code:
+            b.extend(self.code.to_bytes())
+
+        return bytes(b)
+
+module = Module(
+    types=TypeSection(
+    )
+)
+
+args.output_file.write_bytes(module.to_bytes())
