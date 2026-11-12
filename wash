@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from dataclasses import dataclass
+import re
 import sys
 from pathlib import Path
 
@@ -15,48 +17,6 @@ if not args.input_file.exists():
 
 if not args.output_file:
     args.output_file = args.input_file.with_suffix(".wasm")
-
-class i32:
-    @staticmethod
-    def byte():
-        b"\x7f"
-
-class i64:
-    pass
-    @staticmethod
-    def byte():
-        b"\x7e"
-
-class f32:
-    @staticmethod
-    def byte():
-        b"\x7d"
-
-class f64:
-    @staticmethod
-    def byte():
-        b"\x7c"
-
-class v128:
-    @staticmethod
-    def byte():
-        b"\x7b"
-
-class funcref:
-    @staticmethod
-    def byte():
-        b"\x70"
-
-class externref:
-    @staticmethod
-    def byte():
-        b"\x6f"
-
-# Probably ignorable? Exception object
-class exnref:
-    @staticmethod
-    def byte():
-        b"\x69"
 
 def uleb(n):
     out = bytearray()
@@ -79,25 +39,8 @@ def sleb(n):
         if done:
             return bytes(out)
 
-class TypeSection:
-    types: list[FuncSignature]
-
-    @staticmethod
-    def id() -> int:
-        return 1
-
-    def to_bytes(self) -> bytes:
-        body = bytearray()
-        for t in self.types:
-            body.extend(t.to_bytes())
-
-        section = bytearray()
-        section.append(self.id())
-        section.append(uleb(len(body))
-        section.extend(body)
-
-        return bytes(section)
-
+class WasmType:
+    pass
 
 class FuncSignature:
     params: list[WasmType]
@@ -115,178 +58,206 @@ class FuncSignature:
         return bytes(b)
 
 
-class FuncImport:
-    @staticmethod
-    def kind_id():
-        return 0
+class TypeSection:
+    types: list[FuncSignature]
 
-class TableImport:
     @staticmethod
-    def kind_id():
+    def id() -> int:
         return 1
-
-class MemoryImport:
-    @staticmethod
-    def kind_id():
-        return 2
-
-class GlobalImport:
-    @staticmethod
-    def kind_id():
-        return 3
-
-class TagImport:
-    @staticmethod
-    def kind_id():
-        return 4
-
-ImportDescription = FuncImport | TableImport | MemoryImport | GlobalImport | TagImport
-
-class Import:
-    module: str
-    field: str
-    description: ImportDescription
-
-class ImportSection:
-    @staticmethod
-    def id() -> int:
-        return 2
-
-
-class FunctionSection:
-    func_types: list[WasmType]
-
-    @staticmethod
-    def id() -> int:
-        return 3
-
-
-class TableSection:
-    @staticmethod
-    def id() -> int:
-        return 4
-
-
-class MemorySection:
-    @staticmethod
-    def id() -> int:
-        return 5
-
-
-class TagSection:
-    @staticmethod
-    def id() -> int:
-        return 13
-
-
-class GlobalSection:
-    @staticmethod
-    def id() -> int:
-        return 6
-
-
-@dataclass
-class FunctionExport:
-    name: str
-    func: FuncIndex
-
-
-class ExportSection:
-    exports: FunctionExport
-
-    @staticmethod
-    def id() -> int:
-        return 7
 
     def to_bytes(self) -> bytes:
         body = bytearray()
-        for t in self.exports:
-            body.extend(export.to_bytes())
+        for t in self.types:
+            body.extend(t.to_bytes())
 
         section = bytearray()
         section.append(self.id())
-        section.append(uleb(len(body))
+        section.append(uleb(len(body)))
         section.extend(body)
 
         return bytes(section)
 
 
-class StartSection:
-    @staticmethod
-    def id() -> int:
-        return 8
+def tokenize(text) -> list[str]:
+    result = re.findall(r'\w+\.\w+|\w+|\(|:|,|\)|->|\n *', text)
+    print(result)
+    sys.exit()
+    return result
 
 
-class ElementSection:
-    @staticmethod
-    def id() -> int:
-        return 9
+@dataclass
+class Indent:
+    pass
 
 
-class DataCountSection:
-    @staticmethod
-    def id() -> int:
-        return 12
+@dataclass
+class Dedent:
+    pass
 
 
-class CodeSection:
-    @staticmethod
-    def id() -> int:
-        return 10
+@dataclass
+class Newline:
+    pass
 
 
-class DataSection:
-    @staticmethod
-    def id() -> int:
-        return 11
+@dataclass
+class StartBlock:
+    pass
 
 
-class CustomSection:
-    @staticmethod
-    def id() -> int:
-        return 0
+@dataclass
+class EndBlock:
+    pass
 
 
-class Module:
-    types: TypeSection | None = None
-    imports: ImportSection | None = None
-    functions: FunctionSection | None = None
-    tables: TableSection | None = None
-    memory: MemorySection | None = None
-    tags: TagSection | None = None
-    globals: GlobalSection | None = None
-    exports: ExportSection | None = None
-    start: StartSection | None = None
-    elements: ElementSection | None = None
-    data_counts: DataCountSection | None = None
-    code: CodeSection | None = None
-    data: DataSection | None = None
-    custom: CustomSection | None = None
+@dataclass
+class EOF:
+    pass
 
-    def to_bytes(self) -> bytes:
-        preamble = b"\x00\x61\x73\x6d" +  # "\0asm"
-                   b"\x01\x00\x00\x00"    # version 1
 
-        b = bytearray()
-        b.extend(preamble)
+class TokenStream:
+    def __init__(self, text):
+        raw_tokens = re.findall(r'\w+\.\w+|\w+|\(|:|,|\)|->|\n *', text)
+        self.idx = 0
+        self.tokens = []
 
-        if self.types:
-            b.extend(self.types.to_bytes())
+        indents = [""]
+        for token_idx in range(len(raw_tokens)):
+            token = raw_tokens[token_idx]
+            next_token = None if token_idx == len(raw_tokens) - 1 else raw_tokens[token_idx+1]
+            if token.startswith("\n"):
+                if token.starts_with("\n") and next_token.startswith("\n"):
+                    # Skip blank lines
+                    continue
 
-        if self.functions:
-            b.extend(self.functions.to_bytes())
+                self.tokens.append(Newline())
 
-        if self.exports:
-            b.extend(self.exports.to_bytes())
+                indent = token[1:]
+                if indent == indents[-1]:
+                    # Same indentation level
+                    continue
 
-        if self.code:
-            b.extend(self.code.to_bytes())
+                if len(indent) > indents[-1]:
+                    # Deeper indentation
+                    self.tokens.append(Indent())
+                    indents.append(indent)
+                    continue
 
-        return bytes(b)
+                # It's not the same indentation and it's not longer, so it must
+                # be shorter. Figure out how many dedents we need to push based
+                # on matching the indents we've collected.
 
-module = Module(
-    types=TypeSection(
-    )
-)
+                for idx, block_indent in enumerate(reversed(indents)):
+                    if indent == block_indent:
+                        assert idx != 0
+                        self.tokens.extend(Dedent() for _ in range(idx))
+                        break
 
-args.output_file.write_bytes(module.to_bytes())
+                    if len(block_indent) > len(indent):
+                        sys.exit("mismatched indent somewhere...")
+            else:
+                self.tokens.append(token)
+
+    def consume(self, expected=None):
+        if self.idx >= len(self.tokens):
+            return EOF()
+
+        if expected and self.tokens[self.idx] != expected:
+            sys.exit(f"Couldn't find expected {expected}")
+        self.idx += 1
+        return self.tokens[self.idx-1]
+
+    def try_consume(self, expected):
+        if self.idx >= len(self.tokens):
+            return False
+
+        if self.tokens[self.idx] == expected:
+            self.idx += 1
+            return True
+        return False
+
+    def consume_name(self):
+        if self.idx >= len(self.tokens):
+            return EOF()
+
+        if not self.tokens[self.idx].isalnum():
+            sys.exit(f"Couldn't pick up expected name")
+        self.idx += 1
+        return self.tokens[self.idx-1]
+
+    def peek(self):
+        if self.idx >= len(self.tokens):
+            return EOF()
+        return self.tokens[self.idx]
+
+
+def parse(text):
+    out = []
+
+    tokens = TokenStream(text)
+
+
+    idx = 0
+    while True:
+        t = tokens.consume()
+        if t.isalnum():
+            # TODO: parse things other than functions
+
+            export_fn = False
+            name = t
+            if t == "export":
+                export_fn = True
+                name = tokens.consume_name()
+
+            tokens.consume(tokens, "(")
+
+            params = []
+            while not tokens.try_consume(")"):
+                param = tokens.consume_name()
+                tokens.try_consume(":")
+                type_name = tokens.consume_name()
+                tokens.try_consume(",")
+
+                params.append((param, type_name))
+
+            result_types = []
+            if tokens.try_consume("->"):
+                while not tokens.try_consume(":"):
+                    result_types.append(token.consume())
+
+            tokens.consume(Newline())
+            tokens.consume(Indent())
+
+            instructions = []
+            indent_level = 0
+            while True:
+                inst = []
+                while tokens.peek() not in (":", Newline()):
+                    inst.append(tokens.consume())
+                if tokens.try_consume(":"):
+                    tokens.consume(Newline())
+                    tokens.consume(Indent())
+
+                    instructions.append(inst)
+                    instructions.append(StartBlock())
+                    indent_level += 1
+
+                else:
+                    tokens.consume(Newline())
+                    while tokens.try_consume(Dedent()):
+                        instructions.append(EndBlock())
+
+    return result
+
+
+tokens = parse(args.input_file.read_text())
+for t in tokens:
+    print(t)
+sys.exit()
+
+preamble = b"\x00\x61\x73\x6d\x01\x00\x00\x00"
+
+b = bytearray()
+b.extend(preamble)
+
+args.output_file.write_bytes(b)
