@@ -193,6 +193,13 @@ class TokenStream:
             return EOF()
         return self.tokens[self.idx]
 
+    def peek2(self):
+        if self.idx >= len(self.tokens):
+            return (EOF(), EOF())
+        if self.idx+1 >= len(self.tokens):
+            return (self.tokens[self.idx], EOF())
+        return (self.tokens[self.idx], self.tokens[self.idx+1])
+
 
 @dataclass
 class Func:
@@ -211,6 +218,8 @@ class Module:
 
 
 def parse(text) -> Module:
+    # Smooth-brain parsing
+
     funcs = []
 
     tokens = TokenStream(text)
@@ -254,8 +263,8 @@ def parse(text) -> Module:
             while tokens.peek() != EOF():
                 inst = []
 
-                # Get the args in the line
-                while tokens.peek() not in (":", Newline(), EOF()):
+                # Get the args in the line. `peek2` is for handling local declarations
+                while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
                     inst.append(tokens.consume())
 
                 instructions.append(inst)
