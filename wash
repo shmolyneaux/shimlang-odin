@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 import sys
 from pathlib import Path
@@ -117,7 +117,7 @@ class EOF:
 
 class TokenStream:
     def __init__(self, text):
-        raw_tokens = re.findall(r'\w+\.\w+|\w+|\(|:|,|\)|->|\n *', text)
+        raw_tokens = re.findall(r'\w+\.\w+|\w+|\(|:|,|\)|->|\n *|#.*', text)
         self.idx = 0
         self.tokens = []
 
@@ -125,8 +125,10 @@ class TokenStream:
         for token_idx in range(len(raw_tokens)):
             token = raw_tokens[token_idx]
             next_token = None if token_idx == len(raw_tokens) - 1 else raw_tokens[token_idx+1]
+            if token.startswith("#"):
+                continue
             if token.startswith("\n"):
-                if token.starts_with("\n") and next_token.startswith("\n"):
+                if token.startswith("\n") and (not next_token or next_token.startswith("\n")):
                     # Skip blank lines
                     continue
 
@@ -137,7 +139,7 @@ class TokenStream:
                     # Same indentation level
                     continue
 
-                if len(indent) > indents[-1]:
+                if len(indent) > len(indents[-1]):
                     # Deeper indentation
                     self.tokens.append(Indent())
                     indents.append(indent)
@@ -151,10 +153,11 @@ class TokenStream:
                     if indent == block_indent:
                         assert idx != 0
                         self.tokens.extend(Dedent() for _ in range(idx))
+                        indents = indents[:-idx]
                         break
 
-                    if len(block_indent) > len(indent):
-                        sys.exit("mismatched indent somewhere...")
+                else:
+                    sys.exit("mismatched indent somewhere...")
             else:
                 self.tokens.append(token)
 
@@ -191,15 +194,33 @@ class TokenStream:
         return self.tokens[self.idx]
 
 
-def parse(text):
-    out = []
+@dataclass
+class Func:
+    export: bool
+    name: str
+    params: list[tuple[str, str]]
+    results: list[str]
+    instructions: list[list[str] | StartBlock | EndBlock]
+    type_id: int | None = None
+    locals: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Module:
+    funcs: list[Func]
+
+
+def parse(text) -> Module:
+    funcs = []
 
     tokens = TokenStream(text)
 
-
     idx = 0
-    while True:
+    while tokens.peek() != EOF():
         t = tokens.consume()
+        if t == Newline():
+            continue
+
         if t.isalnum():
             # TODO: parse things other than functions
 
@@ -209,7 +230,7 @@ def parse(text):
                 export_fn = True
                 name = tokens.consume_name()
 
-            tokens.consume(tokens, "(")
+            tokens.consume("(")
 
             params = []
             while not tokens.try_consume(")"):
@@ -223,41 +244,136 @@ def parse(text):
             result_types = []
             if tokens.try_consume("->"):
                 while not tokens.try_consume(":"):
-                    result_types.append(token.consume())
+                    result_types.append(tokens.consume())
 
             tokens.consume(Newline())
             tokens.consume(Indent())
 
-            instructions = []
+            instructions: list[list[str] | StartBlock | EndBlock] = []
             indent_level = 0
-            while True:
+            while tokens.peek() != EOF():
                 inst = []
-                while tokens.peek() not in (":", Newline()):
+
+                # Get the args in the line
+                while tokens.peek() not in (":", Newline(), EOF()):
                     inst.append(tokens.consume())
+
+                instructions.append(inst)
+
                 if tokens.try_consume(":"):
                     tokens.consume(Newline())
                     tokens.consume(Indent())
 
-                    instructions.append(inst)
                     instructions.append(StartBlock())
                     indent_level += 1
 
                 else:
                     tokens.consume(Newline())
                     while tokens.try_consume(Dedent()):
+                        indent_level -= 1
+                        if indent_level < 0:
+                            break
                         instructions.append(EndBlock())
+                    if indent_level < 0:
+                        break
 
-    return result
+            funcs.append(
+                Func(
+                    export_fn,
+                    name,
+                    params,
+                    result_types,
+                    instructions,
+                )
+            )
+
+    return Module(
+        funcs,
+    )
 
 
-tokens = parse(args.input_file.read_text())
-for t in tokens:
-    print(t)
-sys.exit()
+module = parse(args.input_file.read_text())
+
+fn_types = []
+for func in module.funcs:
+    signature = ([t for _, t in func.params], func.results)
+    if signature not in fn_types:
+        func.type_id = len(fn_types)
+        fn_types.append(signature)
+    else:
+        func.type_id = fn_types.index(signature)
 
 preamble = b"\x00\x61\x73\x6d\x01\x00\x00\x00"
-
 b = bytearray()
 b.extend(preamble)
+
+type_body = bytearray()
+type_body.extend(uleb(len(fn_types)))
+for ty in fn_types:
+    type_body.append(0x60) # Function type
+
+    params, results = ty
+    type_body.extend(uleb(len(params)))
+    for param in params:
+        if param == "i32":
+            type_body.append(0x7f)
+        else:
+            sys.exit(f"unsupported param type {param}")
+
+    type_body.extend(uleb(len(results)))
+    for result in results:
+        if result == "i32":
+            type_body.append(0x7f)
+        else:
+            sys.exit(f"unsupported result type {param}")
+
+func_body = bytearray()
+func_body.extend(uleb(len(module.funcs)))
+for func in module.funcs:
+    func_body.extend(uleb(func.type_id))
+
+export_body = bytearray()
+export_body.extend(uleb(sum(f.export for f in module.funcs)))
+for idx, f in enumerate(module.funcs):
+    if not f.export:
+        continue
+    byte_name = f.name.encode()
+    export_body.extend(uleb(len(byte_name)))
+    export_body.extend(byte_name)
+    export_body.append(0x00) # Export a function
+    export_body.extend(uleb(idx))
+
+code_body = bytearray()
+code_body.extend(uleb(len(module.funcs)))
+for func in module.funcs:
+    inner = bytearray()
+    inner.extend(uleb(len(func.locals)))
+    for inst in func.instructions:
+        assert inst[0] == "i32.const"
+        assert len(inst) == 2
+        num = int(inst[1])
+
+        inner.append(0x41)
+        inner.extend(uleb(num))
+    inner.append(0x0b) # end
+
+    code_body.extend(uleb(len(inner)))
+    code_body.extend(inner)
+
+b.append(0x01)
+b.extend(uleb(len(type_body)))
+b.extend(type_body)
+
+b.append(0x03)
+b.extend(uleb(len(func_body)))
+b.extend(func_body)
+
+b.append(0x07)
+b.extend(uleb(len(export_body)))
+b.extend(export_body)
+
+b.append(0x0a)
+b.extend(uleb(len(code_body)))
+b.extend(code_body)
 
 args.output_file.write_bytes(b)
