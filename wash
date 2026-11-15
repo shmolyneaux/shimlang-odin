@@ -166,7 +166,7 @@ class TokenStream:
             return EOF()
 
         if expected and self.tokens[self.idx] != expected:
-            sys.exit(f"Couldn't find expected {expected}")
+            raise Exception(f"Couldn't find expected {expected}")
         self.idx += 1
         return self.tokens[self.idx-1]
 
@@ -183,10 +183,20 @@ class TokenStream:
         if self.idx >= len(self.tokens):
             return EOF()
 
-        if not self.tokens[self.idx].isalnum():
-            sys.exit(f"Couldn't pick up expected name")
+        if not self.peek().isalnum():
+            raise Exception(f"Couldn't pick up expected name {self.peek()}")
         self.idx += 1
         return self.tokens[self.idx-1]
+
+    def consume_module_field(self):
+        if self.idx >= len(self.tokens):
+            return EOF()
+
+        if match := re.match(r"(\w+)\.(\w+)", self.peek()):
+            self.idx += 1
+            return match.group(1), match.group(2)
+        else:
+            raise Exception(f"Couldn't pick up expected module_field {self.peek()}")
 
     def peek(self):
         if self.idx >= len(self.tokens):
@@ -209,17 +219,28 @@ class Func:
     results: list[str]
     instructions: list[list[str] | StartBlock | EndBlock]
     type_id: int | None = None
-    locals: list[str] = field(default_factory=list)
+    locals: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class ImportFunc:
+    module: str
+    field: str
+    params: list[str]
+    results: list[str]
+    type_id: int | None = None
 
 
 @dataclass
 class Module:
+    imports: list[ImportFunc]
     funcs: list[Func]
 
 
 def parse(text) -> Module:
     # Smooth-brain parsing
 
+    imports = []
     funcs = []
 
     tokens = TokenStream(text)
@@ -230,73 +251,92 @@ def parse(text) -> Module:
         if t == Newline():
             continue
 
-        if t.isalnum():
-            # TODO: parse things other than functions
+        match t:
+            case "import":
+                module, field = tokens.consume_module_field()
+                params = []
 
-            export_fn = False
-            name = t
-            if t == "export":
-                export_fn = True
-                name = tokens.consume_name()
+                tokens.consume("(")
+                while not tokens.try_consume(")"):
+                    param = tokens.consume_name()
+                    tokens.try_consume(",")
+                    params.append(param)
 
-            tokens.consume("(")
+                result_types = []
+                if tokens.try_consume("->"):
+                    while not tokens.try_consume(Newline()):
+                        result_types.append(tokens.consume())
 
-            params = []
-            while not tokens.try_consume(")"):
-                param = tokens.consume_name()
-                tokens.try_consume(":")
-                type_name = tokens.consume_name()
-                tokens.try_consume(",")
+                imports.append(ImportFunc(module, field, params, result_types))
 
-                params.append((param, type_name))
+            case _ if t.isalnum():
+                export_fn = False
+                name = t
+                if t == "export":
+                    export_fn = True
+                    name = tokens.consume_name()
 
-            result_types = []
-            if tokens.try_consume("->"):
-                while not tokens.try_consume(":"):
-                    result_types.append(tokens.consume())
+                tokens.consume("(")
 
-            tokens.consume(Newline())
-            tokens.consume(Indent())
+                params = []
+                while not tokens.try_consume(")"):
+                    param = tokens.consume_name()
+                    tokens.try_consume(":")
+                    type_name = tokens.consume_name()
+                    tokens.try_consume(",")
 
-            instructions: list[list[str] | StartBlock | EndBlock] = []
-            indent_level = 0
-            while tokens.peek() != EOF():
-                inst = []
+                    params.append((param, type_name))
 
-                # Get the args in the line. `peek2` is for handling local declarations
-                while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
-                    inst.append(tokens.consume())
-
-                instructions.append(inst)
-
-                if tokens.try_consume(":"):
-                    tokens.consume(Newline())
-                    tokens.consume(Indent())
-
-                    instructions.append(StartBlock())
-                    indent_level += 1
-
+                result_types = []
+                if tokens.try_consume("->"):
+                    while not tokens.try_consume(":"):
+                        result_types.append(tokens.consume())
                 else:
-                    tokens.consume(Newline())
-                    while tokens.try_consume(Dedent()):
-                        indent_level -= 1
+                    tokens.consume(":")
+
+                tokens.consume(Newline())
+                tokens.consume(Indent())
+
+                instructions: list[list[str] | StartBlock | EndBlock] = []
+                indent_level = 0
+                while tokens.peek() != EOF():
+                    inst = []
+
+                    # Get the args in the line. `peek2` is for handling local declarations
+                    while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
+                        inst.append(tokens.consume())
+
+                    instructions.append(inst)
+
+                    if tokens.try_consume(":"):
+                        tokens.consume(Newline())
+                        tokens.consume(Indent())
+
+                        instructions.append(StartBlock())
+                        indent_level += 1
+
+                    else:
+                        tokens.consume(Newline())
+                        while tokens.try_consume(Dedent()):
+                            indent_level -= 1
+                            if indent_level < 0:
+                                break
+                            instructions.append(EndBlock())
                         if indent_level < 0:
                             break
-                        instructions.append(EndBlock())
-                    if indent_level < 0:
-                        break
 
-            funcs.append(
-                Func(
-                    export_fn,
-                    name,
-                    params,
-                    result_types,
-                    instructions,
+                funcs.append(
+                    Func(
+                        export_fn,
+                        name,
+                        params,
+                        result_types,
+                        instructions,
+                    )
                 )
-            )
 
     return Module(
+        imports,
         funcs,
     )
 
@@ -304,6 +344,14 @@ def parse(text) -> Module:
 module = parse(args.input_file.read_text())
 
 fn_types = []
+for import_item in module.imports:
+    signature = (import_item.params, import_item.results)
+    if signature not in fn_types:
+        import_item.type_id = len(fn_types)
+        fn_types.append(signature)
+    else:
+        import_item.type_id = fn_types.index(signature)
+
 for func in module.funcs:
     signature = ([t for _, t in func.params], func.results)
     if signature not in fn_types:
@@ -336,6 +384,24 @@ for ty in fn_types:
         else:
             sys.exit(f"unsupported result type {param}")
 
+fn_lookup = {}
+import_body = bytearray()
+import_body.extend(uleb(len(module.imports)))
+for idx, import_item in enumerate(module.imports):
+    byte_name = import_item.module.encode()
+    import_body.extend(uleb(len(byte_name)))
+    import_body.extend(byte_name)
+
+    byte_name = import_item.field.encode()
+    import_body.extend(uleb(len(byte_name)))
+    import_body.extend(byte_name)
+
+    import_body.append(0x00) # Import a function
+    import_body.extend(uleb(import_item.type_id))
+
+    assert import_item.field not in fn_lookup
+    fn_lookup[import_item.field] = len(fn_lookup)
+
 func_body = bytearray()
 func_body.extend(uleb(len(module.funcs)))
 for func in module.funcs:
@@ -344,26 +410,58 @@ for func in module.funcs:
 export_body = bytearray()
 export_body.extend(uleb(sum(f.export for f in module.funcs)))
 for idx, f in enumerate(module.funcs):
+    assert f.name not in fn_lookup
+    fn_idx = len(fn_lookup)
+    fn_lookup[f.name] = fn_idx
     if not f.export:
         continue
+
     byte_name = f.name.encode()
     export_body.extend(uleb(len(byte_name)))
     export_body.extend(byte_name)
     export_body.append(0x00) # Export a function
-    export_body.extend(uleb(idx))
+    export_body.extend(uleb(fn_idx))
 
 code_body = bytearray()
 code_body.extend(uleb(len(module.funcs)))
 for func in module.funcs:
+    local_names = [name for name, _ in func.params] + [name for name, _ in func.locals]
+    local_lookup = {name: idx for idx, name in enumerate(local_names)}
     inner = bytearray()
     inner.extend(uleb(len(func.locals)))
     for inst in func.instructions:
-        assert inst[0] == "i32.const"
-        assert len(inst) == 2
-        num = int(inst[1])
+        match inst[0]:
+            case "i32.const":
+                assert len(inst) == 2
+                num = int(inst[1])
 
-        inner.append(0x41)
-        inner.extend(uleb(num))
+                inner.append(0x41)
+                inner.extend(uleb(num))
+
+            case "local.get":
+                assert len(inst) == 2
+                assert inst[1] in local_lookup
+
+                inner.append(0x20)
+                inner.extend(uleb(local_lookup[inst[1]]))
+
+            case "i32.gt_s":
+                assert len(inst) == 1
+                inner.append(0x4a)
+
+            case "select":
+                assert len(inst) == 1
+                inner.append(0x1b)
+
+            case "call":
+                assert len(inst) == 2
+                if inst[1] not in fn_lookup:
+                    sys.exit(f"Unknown fn {inst[1]}")
+                inner.append(0x10)
+                inner.extend(uleb(fn_lookup[inst[1]]))
+
+            case _:
+                sys.exit(f"Unknown instruction `{inst}`")
     inner.append(0x0b) # end
 
     code_body.extend(uleb(len(inner)))
@@ -372,6 +470,10 @@ for func in module.funcs:
 b.append(0x01)
 b.extend(uleb(len(type_body)))
 b.extend(type_body)
+
+b.append(0x02)
+b.extend(uleb(len(import_body)))
+b.extend(import_body)
 
 b.append(0x03)
 b.extend(uleb(len(func_body)))

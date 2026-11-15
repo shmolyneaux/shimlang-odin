@@ -18,6 +18,7 @@ from wasmtime import (
 
 parser = ArgumentParser()
 parser.add_argument("input_file", type=Path)
+parser.add_argument("call", nargs="*")
 
 args = parser.parse_args()
 
@@ -61,7 +62,37 @@ define("write", [i32, i32], lambda c, p, n: print(text(c, p, n), end=""), True)
 linker.define(store, "env", "memory", imported_memory)
 
 instance = linker.instantiate(store, module)
-result = instance.exports(store)["main"](store)
+
+class T:
+    i32, i64, f32, f64 = i32, i64, f32, f64
+
+if args.call:
+    exports = instance.exports(store)
+    func, *args = args.call
+    if func not in exports:
+        print(f"No export found `{func}`. Only found: {exports}", file=sys.stderr)
+        sys.exit(1)
+    func_type = exports[func].type(store)
+    if len(func_type.params) != len(args):
+        print(f"Export `{func}` expected {len(func_type.params)} args got {len(args)}", file=sys.stderr)
+        sys.exit(1)
+
+    type_cast = {
+        "i32": int,
+        "i64": int,
+        "f32": float,
+        "f64": float,
+    }
+    typed_args = []
+    for param, arg in zip(func_type.params, args):
+        if cast_func := type_cast.get(str(param)):
+            typed_args.append(cast_func(arg))
+        else:
+            print(f"Unknown param type {param}")
+            sys.exit(1)
+    result = exports[func](store, *typed_args)
+else:
+    result = instance.exports(store)["main"](store)
 if result is not None:
     values = result if isinstance(result, list) else [result]
     print(" ".join(str(v) for v in values))
