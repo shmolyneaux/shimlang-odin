@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-from dataclasses import dataclass, field
+from __future__ import annotations
+
 import re
 import sys
-from pathlib import Path
-
 from argparse import ArgumentParser
+from dataclasses import dataclass, field
+from pathlib import Path
 
 parser = ArgumentParser()
 parser.add_argument("input_file", type=Path)
@@ -42,40 +43,10 @@ def sleb(n):
 class WasmType:
     pass
 
+@dataclass
 class FuncSignature:
-    params: list[WasmType]
-    results: list[WasmType]
-
-    def to_bytes(self) -> bytes:
-        b = bytearray()
-        b.append("\x60")
-        b.extend(uleb(len(self.params)))
-        for param in self.params:
-            b.extend(param.to_bytes())
-        b.extend(uleb(len(self.results)))
-        for result in self.results:
-            b.extend(result.to_bytes())
-        return bytes(b)
-
-
-class TypeSection:
-    types: list[FuncSignature]
-
-    @staticmethod
-    def id() -> int:
-        return 1
-
-    def to_bytes(self) -> bytes:
-        body = bytearray()
-        for t in self.types:
-            body.extend(t.to_bytes())
-
-        section = bytearray()
-        section.append(self.id())
-        section.append(uleb(len(body)))
-        section.extend(body)
-
-        return bytes(section)
+    params: list[str]
+    results: list[str]
 
 
 def tokenize(text) -> list[str]:
@@ -112,6 +83,9 @@ class EndBlock:
 
 @dataclass
 class EOF:
+    pass
+
+class ParseException(Exception):
     pass
 
 
@@ -166,7 +140,7 @@ class TokenStream:
             return EOF()
 
         if expected and self.tokens[self.idx] != expected:
-            raise Exception(f"Couldn't find expected {expected}")
+            raise ParseException(f"Couldn't find expected {expected}")
         self.idx += 1
         return self.tokens[self.idx-1]
 
@@ -184,7 +158,7 @@ class TokenStream:
             return EOF()
 
         if not self.peek().isalnum():
-            raise Exception(f"Couldn't pick up expected name {self.peek()}")
+            raise ParseException(f"Couldn't pick up expected name {self.peek()}")
         self.idx += 1
         return self.tokens[self.idx-1]
 
@@ -196,7 +170,7 @@ class TokenStream:
             self.idx += 1
             return match.group(1), match.group(2)
         else:
-            raise Exception(f"Couldn't pick up expected module_field {self.peek()}")
+            raise ParseException(f"Couldn't pick up expected module_field {self.peek()}")
 
     def peek(self):
         if self.idx >= len(self.tokens):
@@ -212,12 +186,20 @@ class TokenStream:
 
 
 @dataclass
+class IfElseBlock:
+    block_type: FuncSignature | None
+    if_block: Instructions
+    else_block: Instructions | None
+
+
+@dataclass
 class Func:
     export: bool
     name: str
     params: list[tuple[str, str]]
     results: list[str]
-    instructions: list[list[str] | StartBlock | EndBlock]
+    instructions: Instructions
+    block_types: list[FuncSignature]
     type_id: int | None = None
     locals: list[tuple[str, str]] = field(default_factory=list)
 
@@ -235,6 +217,84 @@ class ImportFunc:
 class Module:
     imports: list[ImportFunc]
     funcs: list[Func]
+    block_types: list[FuncSignature]
+
+
+Instructions = list[list[str] | IfElseBlock]
+
+
+def parse_block(tokens: TokenStream) -> tuple[Instructions, list[FuncSignature]]:
+    instructions: Instructions = []
+    block_types: list[FuncSignature] = []
+    while tokens.peek() != EOF():
+        # One line ~ one instruction
+        inst = []
+
+        start_idx = tokens.idx
+
+        # Get the args in the line. `peek2` is for handling local declarations
+        while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
+            inst.append(tokens.consume())
+
+        if tokens.try_consume(":"):
+            if inst[0] == "if":
+                # Rewind parsing to pick up optional params/results
+                tokens.idx = start_idx + 1
+
+                signature = None
+                if tokens.peek() == "(":
+                    params, results = parse_signature(tokens)
+                    signature = FuncSignature(params, results)
+
+                tokens.consume(":")
+                tokens.consume(Newline())
+                tokens.consume(Indent())
+                if_block_instructions, if_block_types = parse_block(tokens)
+
+                if tokens.try_consume("else"):
+                    tokens.consume(":")
+                    tokens.consume(Newline())
+                    tokens.consume(Indent())
+                    else_block_instructions, else_block_types = parse_block(tokens)
+
+                instructions.append(
+                    IfElseBlock(
+                        signature,
+                        if_block_instructions,
+                        else_block_instructions,
+                    )
+                )
+                block_types.extend(if_block_types)
+                block_types.extend(else_block_types)
+
+            else:
+                sys.exit(f"Token {inst[0]} cannot start a block")
+
+        else:
+            instructions.append(inst)
+            tokens.consume(Newline())
+
+            if tokens.try_consume(Dedent()):
+                break
+
+    return instructions, block_types
+
+
+def parse_signature(tokens: TokenStream) -> tuple[list[str], list[str]]:
+    params = []
+    results = []
+
+    tokens.consume("(")
+    while not tokens.try_consume(")"):
+        param = tokens.consume_name()
+        tokens.try_consume(",")
+        params.append(param)
+
+    if tokens.try_consume("->"):
+        while tokens.peek() not in (":", Newline()):
+            results.append(tokens.consume())
+
+    return params, results
 
 
 def parse(text) -> Module:
@@ -242,10 +302,10 @@ def parse(text) -> Module:
 
     imports = []
     funcs = []
+    block_types: list[FuncSignature] = []
 
     tokens = TokenStream(text)
 
-    idx = 0
     while tokens.peek() != EOF():
         t = tokens.consume()
         if t == Newline():
@@ -254,22 +314,12 @@ def parse(text) -> Module:
         match t:
             case "import":
                 module, field = tokens.consume_module_field()
-                params = []
-
-                tokens.consume("(")
-                while not tokens.try_consume(")"):
-                    param = tokens.consume_name()
-                    tokens.try_consume(",")
-                    params.append(param)
-
-                result_types = []
-                if tokens.try_consume("->"):
-                    while not tokens.try_consume(Newline()):
-                        result_types.append(tokens.consume())
-
-                imports.append(ImportFunc(module, field, params, result_types))
+                import_params, results = parse_signature(tokens)
+                tokens.consume(NewLine())
+                imports.append(ImportFunc(module, field, import_params, results))
 
             case _ if t.isalnum():
+                # Parse fn
                 export_fn = False
                 name = t
                 if t == "export":
@@ -278,15 +328,17 @@ def parse(text) -> Module:
 
                 tokens.consume("(")
 
-                params = []
+                # Parse params
+                params: list[tuple[str, str]] = []
                 while not tokens.try_consume(")"):
-                    param = tokens.consume_name()
+                    param: str = tokens.consume_name()
                     tokens.try_consume(":")
-                    type_name = tokens.consume_name()
+                    type_name: str = tokens.consume_name()
                     tokens.try_consume(",")
 
                     params.append((param, type_name))
 
+                # Parse results
                 result_types = []
                 if tokens.try_consume("->"):
                     while not tokens.try_consume(":"):
@@ -297,33 +349,8 @@ def parse(text) -> Module:
                 tokens.consume(Newline())
                 tokens.consume(Indent())
 
-                instructions: list[list[str] | StartBlock | EndBlock] = []
-                indent_level = 0
-                while tokens.peek() != EOF():
-                    inst = []
-
-                    # Get the args in the line. `peek2` is for handling local declarations
-                    while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
-                        inst.append(tokens.consume())
-
-                    instructions.append(inst)
-
-                    if tokens.try_consume(":"):
-                        tokens.consume(Newline())
-                        tokens.consume(Indent())
-
-                        instructions.append(StartBlock())
-                        indent_level += 1
-
-                    else:
-                        tokens.consume(Newline())
-                        while tokens.try_consume(Dedent()):
-                            indent_level -= 1
-                            if indent_level < 0:
-                                break
-                            instructions.append(EndBlock())
-                        if indent_level < 0:
-                            break
+                # Parse instructions
+                instructions, new_block_types = parse_block(tokens)
 
                 funcs.append(
                     Func(
@@ -332,59 +359,70 @@ def parse(text) -> Module:
                         params,
                         result_types,
                         instructions,
+                        block_types=block_types,
                     )
                 )
+
+                block_types.extend(new_block_types)
 
     return Module(
         imports,
         funcs,
+        block_types,
     )
+
+
+def type_name_to_id(s: str) -> int:
+    match s:
+        case "i32":
+            return 0x7f
+        case _:
+            sys.exit(f"unsupported result type {param}")
 
 
 module = parse(args.input_file.read_text())
 
-fn_types = []
+block_types: list[tuple[list[str], list[str]]] = []
 for import_item in module.imports:
     signature = (import_item.params, import_item.results)
-    if signature not in fn_types:
-        import_item.type_id = len(fn_types)
-        fn_types.append(signature)
+    if signature not in block_types:
+        import_item.type_id = len(block_types)
+        block_types.append(signature)
     else:
-        import_item.type_id = fn_types.index(signature)
+        import_item.type_id = block_types.index(signature)
 
 for func in module.funcs:
     signature = ([t for _, t in func.params], func.results)
-    if signature not in fn_types:
-        func.type_id = len(fn_types)
-        fn_types.append(signature)
+    if signature not in block_types:
+        func.type_id = len(block_types)
+        block_types.append(signature)
     else:
-        func.type_id = fn_types.index(signature)
+        func.type_id = block_types.index(signature)
+
+    for block_type in func.block_types:
+        signature = (block_type.params, block_types.results)
+        if signature not in block_types:
+            block_types.append(signature)
 
 preamble = b"\x00\x61\x73\x6d\x01\x00\x00\x00"
 b = bytearray()
 b.extend(preamble)
 
 type_body = bytearray()
-type_body.extend(uleb(len(fn_types)))
-for ty in fn_types:
+type_body.extend(uleb(len(block_types)))
+for ty in block_types:
     type_body.append(0x60) # Function type
 
     params, results = ty
     type_body.extend(uleb(len(params)))
     for param in params:
-        if param == "i32":
-            type_body.append(0x7f)
-        else:
-            sys.exit(f"unsupported param type {param}")
+        type_body.append(type_name_to_id(param))
 
     type_body.extend(uleb(len(results)))
     for result in results:
-        if result == "i32":
-            type_body.append(0x7f)
-        else:
-            sys.exit(f"unsupported result type {param}")
+        type_body.append(type_name_to_id(result))
 
-fn_lookup = {}
+fn_lookup: dict[str, int] = {}
 import_body = bytearray()
 import_body.extend(uleb(len(module.imports)))
 for idx, import_item in enumerate(module.imports):
@@ -422,6 +460,72 @@ for idx, f in enumerate(module.funcs):
     export_body.append(0x00) # Export a function
     export_body.extend(uleb(fn_idx))
 
+
+def assemble(inst: Instruction) -> list[int]:
+    inner = []
+    match inst:
+        case IfElseBlock(
+            if_signature,
+            if_block_instructions,
+            else_block_instructions,
+        ):
+            inner.append(0x04)
+            if not if_signature.params and not if_signature.results:
+                inner.append(0x40)
+            elif not if_signature.params and len(if_signature.results) == 1:
+                inner.append(type_name_to_id(if_signature.results[0]))
+            else:
+                type_id = None
+                for idx, sig in enumerate(fn_types):
+                    if sig == if_signature:
+                        type_id = idx
+                assert type_id is not None
+                inner.extend(sleb(type_id))
+
+            for block_inst in if_block_instructions:
+                inner.extend(assemble(block_inst))
+
+            if else_block_instructions:
+                inner.append(0x05)
+                for block_inst in else_block_instructions:
+                    inner.extend(assemble(block_inst))
+
+            inner.append(0x0b)
+
+        case ["i32.const", *_]:
+            assert len(inst) == 2
+            num = int(inst[1])
+
+            inner.append(0x41)
+            inner.extend(uleb(num))
+
+        case ["local.get", *_]:
+            assert len(inst) == 2
+            assert inst[1] in local_lookup
+
+            inner.append(0x20)
+            inner.extend(uleb(local_lookup[inst[1]]))
+
+        case ["i32.gt_s", *_]:
+            assert len(inst) == 1
+            inner.append(0x4a)
+
+        case ["select", *_]:
+            assert len(inst) == 1
+            inner.append(0x1b)
+
+        case ["call", *_]:
+            assert len(inst) == 2
+            if inst[1] not in fn_lookup:
+                sys.exit(f"Unknown fn {inst[1]}")
+            inner.append(0x10)
+            inner.extend(uleb(fn_lookup[inst[1]]))
+
+        case _:
+            sys.exit(f"Unknown instruction `{inst}`")
+
+    return inner
+
 code_body = bytearray()
 code_body.extend(uleb(len(module.funcs)))
 for func in module.funcs:
@@ -430,38 +534,7 @@ for func in module.funcs:
     inner = bytearray()
     inner.extend(uleb(len(func.locals)))
     for inst in func.instructions:
-        match inst[0]:
-            case "i32.const":
-                assert len(inst) == 2
-                num = int(inst[1])
-
-                inner.append(0x41)
-                inner.extend(uleb(num))
-
-            case "local.get":
-                assert len(inst) == 2
-                assert inst[1] in local_lookup
-
-                inner.append(0x20)
-                inner.extend(uleb(local_lookup[inst[1]]))
-
-            case "i32.gt_s":
-                assert len(inst) == 1
-                inner.append(0x4a)
-
-            case "select":
-                assert len(inst) == 1
-                inner.append(0x1b)
-
-            case "call":
-                assert len(inst) == 2
-                if inst[1] not in fn_lookup:
-                    sys.exit(f"Unknown fn {inst[1]}")
-                inner.append(0x10)
-                inner.extend(uleb(fn_lookup[inst[1]]))
-
-            case _:
-                sys.exit(f"Unknown instruction `{inst}`")
+        inner.extend(assemble(inst))
     inner.append(0x0b) # end
 
     code_body.extend(uleb(len(inner)))
