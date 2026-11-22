@@ -180,11 +180,21 @@ class TokenStream:
             return True
         return False
 
+    def maybe_consume_name(self) -> str | None:
+        if self.idx >= len(self.tokens):
+            return None
+
+        if not self.peek().replace("_", "a").isalnum():
+            return None
+
+        self.idx += 1
+        return self.tokens[self.idx-1]
+
     def consume_name(self):
         if self.idx >= len(self.tokens):
             return EOF()
 
-        if not self.peek().isalnum():
+        if not self.peek().replace("_", "a").isalnum():
             raise ParseException(f"Couldn't pick up expected name {self.peek()}")
         self.idx += 1
         return self.tokens[self.idx-1]
@@ -220,6 +230,13 @@ class IfElseBlock:
 
 
 @dataclass
+class LoopBlock:
+    label: str | None
+    block_type: FuncSignature | None
+    block: Instructions
+
+
+@dataclass
 class Func:
     export: bool
     name: str
@@ -247,7 +264,7 @@ class Module:
     block_types: list[FuncSignature]
 
 
-Instructions = list[list[str] | IfElseBlock]
+Instructions = list[list[str] | IfElseBlock | LoopBlock]
 
 
 def parse_block(tokens: TokenStream) -> tuple[Instructions, list[FuncSignature]]:
@@ -264,35 +281,47 @@ def parse_block(tokens: TokenStream) -> tuple[Instructions, list[FuncSignature]]
             inst.append(tokens.consume())
 
         if tokens.try_consume(":"):
+            # Rewind parsing to pick up optional params/results
+            tokens.idx = start_idx + 1
+            label = tokens.maybe_consume_name()
+            signature = None
+            if tokens.peek() == "(":
+                params, results = parse_signature(tokens)
+                signature = FuncSignature(params, results)
+                block_types.append(signature)
+
+            tokens.consume(":")
+            tokens.consume(Newline())
+            tokens.consume(Indent())
+
+            block_instructions, new_block_types = parse_block(tokens)
+            block_types.extend(new_block_types)
+
             if inst[0] == "if":
-                # Rewind parsing to pick up optional params/results
-                tokens.idx = start_idx + 1
-
-                signature = None
-                if tokens.peek() == "(":
-                    params, results = parse_signature(tokens)
-                    signature = FuncSignature(params, results)
-
-                tokens.consume(":")
-                tokens.consume(Newline())
-                tokens.consume(Indent())
-                if_block_instructions, if_block_types = parse_block(tokens)
-
+                else_block_instructions = []
                 if tokens.try_consume("else"):
                     tokens.consume(":")
                     tokens.consume(Newline())
                     tokens.consume(Indent())
                     else_block_instructions, else_block_types = parse_block(tokens)
+                    block_types.extend(else_block_types)
 
                 instructions.append(
                     IfElseBlock(
                         signature,
-                        if_block_instructions,
+                        block_instructions,
                         else_block_instructions,
                     )
                 )
-                block_types.extend(if_block_types)
-                block_types.extend(else_block_types)
+
+            elif inst[0] == "loop":
+                instructions.append(
+                    LoopBlock(
+                        label,
+                        signature,
+                        block_instructions,
+                    )
+                )
 
             else:
                 sys.exit(f"Token {inst[0]} cannot start a block")
@@ -342,10 +371,10 @@ def parse(text) -> Module:
             case "import":
                 module, field = tokens.consume_module_field()
                 import_params, results = parse_signature(tokens)
-                tokens.consume(NewLine())
+                tokens.consume(Newline())
                 imports.append(ImportFunc(module, field, import_params, results))
 
-            case _ if t.isalnum():
+            case _ if t.replace("_", "a").isalnum():
                 # Parse fn
                 export_fn = False
                 name = t
@@ -494,7 +523,20 @@ for idx, f in enumerate(module.funcs):
     export_body.extend(uleb(fn_idx))
 
 
-def assemble(inst: Instruction, local_lookup: dict[str, int]) -> list[int]:
+def signature_to_type_id(signature: FuncSignature | None) -> list[int]:
+    if not signature or (not signature.params and not signature.results):
+        return [0x40]
+    elif not signature.params and len(signature.results) == 1:
+        return [type_name_to_id(signature.results[0])]
+    else:
+        type_id = None
+        for idx, sig in enumerate(fn_types):
+            if sig == signature:
+                return sleb(idx)
+    raise ParseException(f"No type_id for {signature}")
+
+
+def assemble(inst: Instruction, local_lookup: dict[str, int], block_label: list[str | None]) -> list[int]:
     inner = []
     match inst:
         case IfElseBlock(
@@ -503,27 +545,36 @@ def assemble(inst: Instruction, local_lookup: dict[str, int]) -> list[int]:
             else_block_instructions,
         ):
             inner.append(0x04)
-            if not if_signature.params and not if_signature.results:
-                inner.append(0x40)
-            elif not if_signature.params and len(if_signature.results) == 1:
-                inner.append(type_name_to_id(if_signature.results[0]))
-            else:
-                type_id = None
-                for idx, sig in enumerate(fn_types):
-                    if sig == if_signature:
-                        type_id = idx
-                assert type_id is not None
-                inner.extend(sleb(type_id))
+            inner.extend(signature_to_type_id(if_signature))
 
             for block_inst in if_block_instructions:
-                inner.extend(assemble(block_inst, local_lookup))
+                inner.extend(assemble(block_inst, local_lookup, block_label + [None]))
 
             if else_block_instructions:
                 inner.append(0x05)
                 for block_inst in else_block_instructions:
-                    inner.extend(assemble(block_inst, local_lookup))
+                    inner.extend(assemble(block_inst, local_lookup, block_label + [None]))
 
             inner.append(0x0b)
+
+        case LoopBlock(label, signature, block):
+            inner.append(0x03)
+            inner.extend(signature_to_type_id(signature))
+
+            for block_inst in block:
+                inner.extend(assemble(block_inst, local_lookup, block_label + [label]))
+
+            inner.append(0x0b)
+
+        case ["br", label]:
+            assert label in block_label
+            inner.append(0x0c)
+            inner.append(len(block_label) - block_label.index(label) - 1)
+
+        case ["br_if", label]:
+            assert label in block_label
+            inner.append(0x0d)
+            inner.append(len(block_label) - block_label.index(label) - 1)
 
         case ["i32.const", *_]:
             assert len(inst) == 2
@@ -539,13 +590,36 @@ def assemble(inst: Instruction, local_lookup: dict[str, int]) -> list[int]:
             inner.append(0x20)
             inner.extend(uleb(local_lookup[inst[1]]))
 
-        case ["i32.gt_s", *_]:
+        case ["local.set", *_]:
+            assert len(inst) == 2
+            assert inst[1] in local_lookup
+
+            inner.append(0x21)
+            inner.extend(uleb(local_lookup[inst[1]]))
+
+        case ["local.tee", *_]:
+            assert len(inst) == 2
+            assert inst[1] in local_lookup
+
+            inner.append(0x22)
+            inner.extend(uleb(local_lookup[inst[1]]))
+
+        case ["i32.gt_s"]:
             assert len(inst) == 1
             inner.append(0x4a)
+
+        case ["i32.add"]:
+            inner.append(0x6a)
+
+        case ["i32.sub"]:
+            inner.append(0x6b)
 
         case ["select", *_]:
             assert len(inst) == 1
             inner.append(0x1b)
+
+        case ["return"]:
+            inner.append(0x0f)
 
         case ["call", *_]:
             assert len(inst) == 2
@@ -583,7 +657,7 @@ for func in module.funcs:
                         inner.extend(uleb(count))
                         inner.append(type_name_to_id(type_name))
                     locals_done = True
-        inner.extend(assemble(inst, local_lookup))
+        inner.extend(assemble(inst, local_lookup, []))
     inner.append(0x0b) # end
 
     code_body.extend(uleb(len(inner)))
