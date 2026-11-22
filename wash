@@ -19,6 +19,33 @@ if not args.input_file.exists():
 if not args.output_file:
     args.output_file = args.input_file.with_suffix(".wasm")
 
+
+def consecutive_counts(items: list[str]) -> list(tuple[int, str]):
+    if not items:
+        return []
+
+    result = []
+
+    count = 1
+    for idx, item in enumerate(items):
+        if idx == 0:
+            continue
+        prev_item = items[idx-1]
+        if item != prev_item:
+            result.append((count, prev_item))
+            count = 0
+        count += 1
+    result.append((count, items[-1]))
+
+    return result
+
+assert consecutive_counts([]) == []
+assert consecutive_counts(["i32"]) == [(1, "i32")]
+assert consecutive_counts(["i32", "i32"]) == [(2, "i32")]
+assert consecutive_counts(["i32", "i32", "f32"]) == [(2, "i32"), (1, "f32")]
+assert consecutive_counts(["i32", "i32", "f32", "i32"]) == [(2, "i32"), (1, "f32"), (1, "i32")]
+assert consecutive_counts(["i32", "i32", "f32", "i32", "i32"]) == [(2, "i32"), (1, "f32"), (2, "i32")]
+
 def uleb(n):
     out = bytearray()
     while True:
@@ -233,7 +260,7 @@ def parse_block(tokens: TokenStream) -> tuple[Instructions, list[FuncSignature]]
         start_idx = tokens.idx
 
         # Get the args in the line. `peek2` is for handling local declarations
-        while tokens.peek() not in (":", Newline(), EOF()) and tokens.peek2() != (":", Newline()):
+        while tokens.peek() not in (Newline(), EOF()) and tokens.peek2() != (":", Newline()):
             inst.append(tokens.consume())
 
         if tokens.try_consume(":"):
@@ -376,8 +403,14 @@ def type_name_to_id(s: str) -> int:
     match s:
         case "i32":
             return 0x7f
+        case "i64":
+            return 0x7e
+        case "f32":
+            return 0x7d
+        case "f64":
+            return 0x7c
         case _:
-            sys.exit(f"unsupported result type {param}")
+            sys.exit(f"unsupported result type {s}")
 
 
 module = parse(args.input_file.read_text())
@@ -461,7 +494,7 @@ for idx, f in enumerate(module.funcs):
     export_body.extend(uleb(fn_idx))
 
 
-def assemble(inst: Instruction) -> list[int]:
+def assemble(inst: Instruction, local_lookup: dict[str, int]) -> list[int]:
     inner = []
     match inst:
         case IfElseBlock(
@@ -483,12 +516,12 @@ def assemble(inst: Instruction) -> list[int]:
                 inner.extend(sleb(type_id))
 
             for block_inst in if_block_instructions:
-                inner.extend(assemble(block_inst))
+                inner.extend(assemble(block_inst, local_lookup))
 
             if else_block_instructions:
                 inner.append(0x05)
                 for block_inst in else_block_instructions:
-                    inner.extend(assemble(block_inst))
+                    inner.extend(assemble(block_inst, local_lookup))
 
             inner.append(0x0b)
 
@@ -529,12 +562,28 @@ def assemble(inst: Instruction) -> list[int]:
 code_body = bytearray()
 code_body.extend(uleb(len(module.funcs)))
 for func in module.funcs:
-    local_names = [name for name, _ in func.params] + [name for name, _ in func.locals]
+    local_names = [name for name, _ in func.params]
     local_lookup = {name: idx for idx, name in enumerate(local_names)}
     inner = bytearray()
-    inner.extend(uleb(len(func.locals)))
+
+    locals_done = False
+    local_types = []
     for inst in func.instructions:
-        inner.extend(assemble(inst))
+        if not locals_done:
+            match inst:
+                case [str(local_name), ":", str(type_name)]:
+                    assert local_name not in local_lookup
+                    local_lookup[local_name] = len(local_lookup)
+                    local_types.append(type_name)
+                    continue
+                case _:
+                    groups = consecutive_counts(local_types)
+                    inner.extend(uleb(len(groups)))
+                    for count, type_name in groups:
+                        inner.extend(uleb(count))
+                        inner.append(type_name_to_id(type_name))
+                    locals_done = True
+        inner.extend(assemble(inst, local_lookup))
     inner.append(0x0b) # end
 
     code_body.extend(uleb(len(inner)))
