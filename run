@@ -53,6 +53,8 @@ def define(name, params, func, access_caller=False):
 
 
 define("print_i32", [i32], lambda x: print(x))
+define("print_i32_hex", [i32], lambda x: print(hex(x)))
+define("print_i32_bin", [i32], lambda x: print(bin(x)))
 define("print_u32", [i32], lambda x: print(x & 0xFFFF_FFFF))
 define("print_i64", [i64], lambda x: print(x))
 define("print_f32", [f32], lambda x: print(x))
