@@ -479,7 +479,7 @@ for func in module.funcs:
         func.type_id = block_types.index(signature)
 
     for block_type in func.block_types:
-        signature = (block_type.params, block_types.results)
+        signature = (block_type.params, block_type.results)
         if signature not in block_types:
             block_types.append(signature)
 
@@ -546,9 +546,8 @@ def signature_to_type_id(signature: FuncSignature | None) -> list[int]:
     elif not signature.params and len(signature.results) == 1:
         return [type_name_to_id(signature.results[0])]
     else:
-        type_id = None
-        for idx, sig in enumerate(fn_types):
-            if sig == signature:
+        for idx, sig in enumerate(block_types):
+            if sig == (signature.params, signature.results):
                 return sleb(idx)
     raise ParseException(f"No type_id for {signature}")
 
